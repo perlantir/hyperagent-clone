@@ -1,8 +1,10 @@
 // Health & capability probe.
-// Returns deployment metadata and which provider keys are present at the
-// platform (env-var) level. Per-user keys are surfaced via /api/settings/secrets.
+// Returns deployment metadata, which provider keys are present at the
+// platform (env-var) level, and audit subsystem stats. Per-user keys are
+// surfaced via /api/settings/secrets.
 
 import { NextResponse } from "next/server";
+import { getAuditStats } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,6 +18,7 @@ export async function GET() {
     region: process.env.VERCEL_REGION || null,
     nodeVersion: process.version,
     note: "Per-user keys override env-var fallbacks. Visit /settings → API Keys to BYO.",
+    auditStats: getAuditStats(),
     capabilities: {
       // Platform infra
       database: has("DATABASE_URL"),

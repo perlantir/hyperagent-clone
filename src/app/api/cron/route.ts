@@ -9,6 +9,7 @@ import { NextResponse } from "next/server";
 import { runDueSchedules } from "@/lib/scheduler";
 import { withIdempotency, pruneExpiredIdempotency } from "@/lib/idempotency";
 import { pruneExpiredRateLimits } from "@/lib/rate-limit";
+import { replayDlq } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -33,16 +34,25 @@ export async function GET(req: Request) {
     { namespace: "cron", key, ttlSeconds: 600 }, // 10min — well past any retry window
     async () => {
       const scheduleResult = await runDueSchedules();
-      // Hourly sweep of expired idempotency + rate-limit rows. Cheap if nothing expired.
+      // Hourly sweeps. Each is wrapped in its own try so one failure doesn't
+      // block the others. Counts surface in the cron response for monitoring.
       let sweptIdempotency = 0;
       let sweptRateLimits = 0;
+      let dlqReplayed = 0, dlqFailed = 0;
       if (minute % 60 === 0) {
         try { sweptIdempotency = await pruneExpiredIdempotency(); }
         catch (e) { console.error("[cron sweep idempotency]", e); }
         try { sweptRateLimits = await pruneExpiredRateLimits(); }
         catch (e) { console.error("[cron sweep rate_limit]", e); }
+        // P33a — replay any audit events that had to fall back to the DLQ.
+        // If primary INSERT was failing transiently, replay should succeed
+        // now and audit_log gets backfilled.
+        try {
+          const r = await replayDlq(100);
+          dlqReplayed = r.replayed; dlqFailed = r.failed;
+        } catch (e) { console.error("[cron replay dlq]", e); }
       }
-      return { ...scheduleResult, sweptIdempotency, sweptRateLimits };
+      return { ...scheduleResult, sweptIdempotency, sweptRateLimits, dlqReplayed, dlqFailed };
     },
   );
 
