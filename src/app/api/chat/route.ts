@@ -19,6 +19,10 @@ import { balance, chargeCredits, computeCost } from "@/lib/credits";
 import { startRun, endRun, TraceEmitter } from "@/lib/traces";
 import { detectLoop, truncateMessages, classifyError } from "@/lib/providers";
 import { setBudgetCap, chargeRunBudget, isOverBudget, DEFAULT_CHAT_TURN_BUDGET } from "@/lib/budget";
+import { evaluateAllApplicable } from "@/lib/rubrics";
+import { recordFinding } from "@/lib/rubric-improvement";
+import { getEventsForRun } from "@/lib/traces";
+import { getWorkingDoc } from "@/lib/working-memory";
 // Note: scheduler is now driven by Vercel Cron at /api/cron, no in-process loop.
 
 export const dynamic = "force-dynamic";
@@ -374,6 +378,51 @@ export async function POST(req: Request) {
           });
         } catch (traceErr) {
           console.error("[trace finalize]", traceErr);
+        }
+
+        // P26 — auto-eval against pinned rubrics for multi-step runs.
+        // Skip for trivial single-shot turns (≤2 tool calls AND no working
+        // memory updates) since rubric evaluation costs an LLM call per
+        // judge criterion and adds no value on chitchat.
+        const wasMultiStep =
+          toolCallsPersisted.length >= 2 ||
+          toolCallsPersisted.some(t => t.name === "update_working_memory" || t.name === "dispatch_agent");
+        if (wasMultiStep) {
+          try {
+            const traceEvents = await getEventsForRun(runId, user.id);
+            const wd = await getWorkingDoc(threadId);
+            // Build a string of system blocks for regex checks against system_prompt target
+            const systemBlocksText = compiled.systemBlocks.map(b => b.text).join("\n\n");
+            const tcSummary = toolCallsPersisted.map(t => ({
+              name: t.name, args: t.args, result: t.result, success: !t.result?.startsWith?.("Tool error:"),
+            }));
+            const evalResults = await evaluateAllApplicable({
+              userId: user.id,
+              agentId: agentId || null,
+              runId,
+              userMessage: content,
+              agentResponse: accumulatedText,
+              systemBlocksText,
+              toolCalls: tcSummary,
+              traceEvents,
+              workingDocSections: wd?.sections,
+              run: { budgetCapCredits: budgetCap, spentCredits: cost },
+              artifactIds,
+            });
+            // Feed each failed finding into the improvement-proposal pattern detector
+            for (const r of evalResults) {
+              for (const finding of r.findings) {
+                if (!finding.passed) {
+                  recordFinding({
+                    userId: user.id, agentId: agentId || null,
+                    rubricId: r.rubricId, finding,
+                  }).catch(e => console.error("[rubric improvement]", e));
+                }
+              }
+            }
+          } catch (evalErr) {
+            console.error("[rubric auto-eval]", evalErr);
+          }
         }
       } catch (e: any) {
         console.error("[chat]", e);

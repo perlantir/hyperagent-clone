@@ -11,7 +11,8 @@
     "test:providers": "npx tsx src/lib/__tests__/providers.test.ts",
     "test:working-memory": "npx tsx src/lib/__tests__/working-memory.test.ts",
     "test:embeddings": "npx tsx src/lib/__tests__/embeddings.test.ts",
-    "test:all": "npm run test:prompt && npm run test:providers && npm run test:working-memory && npm run test:embeddings"
+    "test:rubric": "npx tsx src/lib/__tests__/rubric-deterministic.test.ts",
+    "test:all": "npm run test:prompt && npm run test:providers && npm run test:working-memory && npm run test:embeddings && npm run test:rubric"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.3",
