@@ -9,6 +9,7 @@ import {
 import { clientForUser, DEFAULT_MODEL } from "./llm";
 import { resolveAllTools } from "./tools";
 import { computeCost, chargeCredits, balance } from "./credits";
+import { startRun, endRun, TraceEmitter } from "./traces";
 
 export async function runDueSchedules(): Promise<{ ran: number; skipped: number; errors: number }> {
   const schedules = await listAllActiveSchedules();
@@ -39,6 +40,17 @@ async function runSchedule(scheduleId: string) {
   const startedAt = Date.now();
   const run = await createRun({ scheduleId, threadId: null, status: "running", output: "", startedAt, endedAt: null });
 
+  // P28a — start a trace run alongside the scheduler run.
+  const traceRunId = await startRun({
+    userId: s.userId, agentId: s.agentId,
+    kind: "scheduled",
+    metadata: { scheduleId, scheduleName: s.name, scheduleRunId: run.id },
+  });
+  const emitter = new TraceEmitter(traceRunId);
+  let totalIn = 0, totalOut = 0, cost = 0;
+  let status: "succeeded" | "failed" = "succeeded";
+  let errMsg: string | undefined;
+
   try {
     const agent = await getAgent(s.agentId, s.userId);
     if (!agent) throw new Error("Agent not found");
@@ -49,6 +61,7 @@ async function runSchedule(scheduleId: string) {
 
     const { tools } = await resolveAllTools(s.userId, agent.tools);
     const ant = await clientForUser(s.userId);
+    const llmStart = Date.now();
     const result = await ant.messages.create({
       model: DEFAULT_MODEL,
       max_tokens: 1024,
@@ -56,16 +69,43 @@ async function runSchedule(scheduleId: string) {
       messages: [{ role: "user", content: s.prompt }],
       tools: tools as any,
     });
+    const llmDuration = Date.now() - llmStart;
+
+    totalIn = result.usage?.input_tokens ?? 0;
+    totalOut = result.usage?.output_tokens ?? 0;
+    emitter.emit("llm_call", {
+      model: DEFAULT_MODEL,
+      inputTokens: totalIn,
+      outputTokens: totalOut,
+      stopReason: result.stop_reason,
+    }, { durationMs: llmDuration });
 
     let text = "";
     for (const b of result.content) if (b.type === "text") text += b.text;
 
-    const cost = computeCost(result.usage?.input_tokens ?? 0, result.usage?.output_tokens ?? 0);
+    cost = computeCost(totalIn, totalOut);
     await chargeCredits(s.userId, cost, "Scheduled run", run.id);
     await updateMessage(assistantMsg.id, { content: text });
 
     await updateRun(run.id, { status: "ok", output: text.slice(0, 4000), threadId: thread.id, endedAt: Date.now() });
   } catch (e: any) {
-    await updateRun(run.id, { status: "error", output: e?.message || String(e), endedAt: Date.now() });
+    status = "failed";
+    errMsg = e?.message || String(e);
+    emitter.emit("error", { source: "scheduler", message: errMsg });
+    await updateRun(run.id, { status: "error", output: errMsg!, endedAt: Date.now() });
+  }
+
+  // Always finalize the trace, success or failure.
+  try {
+    await emitter.flush();
+    await endRun(traceRunId, {
+      status,
+      totalInputTokens: totalIn,
+      totalOutputTokens: totalOut,
+      totalCostCredits: cost,
+      errorMessage: errMsg,
+    });
+  } catch (traceErr) {
+    console.error("[trace finalize scheduler]", traceErr);
   }
 }

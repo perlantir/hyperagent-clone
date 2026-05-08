@@ -11,6 +11,7 @@ import { clientForUser, DEFAULT_MODEL } from "@/lib/llm";
 import { resolveAllTools } from "@/lib/tools";
 import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
 import { computeCost, chargeCredits, balance } from "@/lib/credits";
+import { startRun, endRun, TraceEmitter } from "@/lib/traces";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -73,19 +74,61 @@ export async function POST(req: Request) {
   const toolNames = agent?.tools || ["web_search", "generate_artifact"];
   const { tools } = await resolveAllTools(userId, toolNames);
 
-  const ant = await clientForUser(userId);
-  const result = await ant.messages.create({
-    model: DEFAULT_MODEL,
-    max_tokens: 2048,
-    system,
-    messages: [{ role: "user", content: message }],
-    tools: tools as any,
+  // P28a — start trace for this v1 API call.
+  const traceRunId = await startRun({
+    userId, threadId, messageId: assistantMsg.id,
+    agentId: agentId || null,
+    kind: "v1_api",
   });
-  let content = "";
-  for (const b of result.content) if (b.type === "text") content += b.text;
-  const costCredits = computeCost(result.usage?.input_tokens ?? 0, result.usage?.output_tokens ?? 0);
-  await chargeCredits(userId, costCredits, "Public API", assistantMsg.id);
-  await updateMessage(assistantMsg.id, { content });
+  const emitter = new TraceEmitter(traceRunId);
 
-  return NextResponse.json({ threadId, messageId: assistantMsg.id, content, costCredits });
+  let totalIn = 0, totalOut = 0, costCredits = 0;
+  let content = "";
+  let status: "succeeded" | "failed" = "succeeded";
+  let errMsg: string | undefined;
+
+  try {
+    const ant = await clientForUser(userId);
+    const llmStart = Date.now();
+    const result = await ant.messages.create({
+      model: DEFAULT_MODEL,
+      max_tokens: 2048,
+      system,
+      messages: [{ role: "user", content: message }],
+      tools: tools as any,
+    });
+    const llmDuration = Date.now() - llmStart;
+    totalIn = result.usage?.input_tokens ?? 0;
+    totalOut = result.usage?.output_tokens ?? 0;
+    emitter.emit("llm_call", {
+      model: DEFAULT_MODEL,
+      inputTokens: totalIn, outputTokens: totalOut,
+      stopReason: result.stop_reason,
+    }, { durationMs: llmDuration });
+    for (const b of result.content) if (b.type === "text") content += b.text;
+    costCredits = computeCost(totalIn, totalOut);
+    await chargeCredits(userId, costCredits, "Public API", assistantMsg.id);
+    await updateMessage(assistantMsg.id, { content });
+  } catch (e: any) {
+    status = "failed";
+    errMsg = e?.message || String(e);
+    emitter.emit("error", { source: "v1_chat", message: errMsg });
+    await updateMessage(assistantMsg.id, { content: `Error: ${errMsg}` });
+  }
+
+  try {
+    await emitter.flush();
+    await endRun(traceRunId, {
+      status,
+      totalInputTokens: totalIn, totalOutputTokens: totalOut,
+      totalCostCredits: costCredits, errorMessage: errMsg,
+    });
+  } catch (traceErr) {
+    console.error("[trace finalize v1]", traceErr);
+  }
+
+  if (status === "failed") {
+    return NextResponse.json({ error: errMsg, runId: traceRunId }, { status: 500 });
+  }
+  return NextResponse.json({ threadId, messageId: assistantMsg.id, content, costCredits, runId: traceRunId });
 }

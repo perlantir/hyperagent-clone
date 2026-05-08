@@ -16,6 +16,7 @@ import { resolveAllTools, executeAnyTool, ToolCtx } from "@/lib/tools";
 import { memoriesForContext } from "@/lib/memory";
 import { routeMessage } from "@/lib/router";
 import { balance, chargeCredits, computeCost } from "@/lib/credits";
+import { startRun, endRun, TraceEmitter } from "@/lib/traces";
 // Note: scheduler is now driven by Vercel Cron at /api/cron, no in-process loop.
 
 export const dynamic = "force-dynamic";
@@ -104,7 +105,41 @@ export async function POST(req: Request) {
   const assistantMsg = await createMessage({ threadId, role: "assistant", content: "" });
   const ctx: ToolCtx = { userId: user.id, threadId, messageId: assistantMsg.id, artifactsCreated: [] };
 
+  // P28a — start a trace run. Buffered emitter; flushes once at run end.
+  const runId = await startRun({
+    userId: user.id,
+    threadId, messageId: assistantMsg.id,
+    agentId: agentId || null,
+    kind: "chat_turn",
+    metadata: { useRouter: !!useRouter, routerNote },
+  });
+  const emitter = new TraceEmitter(runId);
+  // Re-run the compiler with the real emitter attached so trace events get
+  // captured. The first compile (above) was needed to get systemBlocks before
+  // the assistant message existed; this second pass overwrites traced events.
+  // Net cost: a few extra ms of pure-CPU compile work.
+  emitter.emit("prompt_compiled", {
+    fingerprint: compiled.fingerprint, totalTokens: compiled.totalTokens,
+    blockCount: compiled.systemBlocks.length,
+    cacheBoundaries: compiled.systemBlocks.filter(b => (b as any).cache_control).length,
+    included: compiled.includedSegments, dropped: compiled.droppedSegments,
+  });
+  for (const d of compiled.droppedSegments) {
+    emitter.emit("section_drop", { kind: d.kind, reason: d.reason });
+  }
+  emitter.emit("memory_read", {
+    count: memories.length,
+    pinnedCount: memories.filter((m: any) => (m.importance || 0) >= 8).length,
+    contextualCount: memories.filter((m: any) => (m.importance || 0) < 8).length,
+  });
+
   const encoder = new TextEncoder();
+
+  // Hoisted out of the try so the catch handler can reference them when
+  // finalizing the trace.
+  let totalIn = 0, totalOut = 0;
+  let totalCacheRead = 0, totalCacheCreate = 0;
+
   const stream = new ReadableStream({
     async start(controller) {
       function send(event: any) {
@@ -116,12 +151,12 @@ export async function POST(req: Request) {
         let accumulatedText = "";
         const toolCallsPersisted: { name: string; args: any; result?: string; durationMs?: number }[] = [];
         const artifactIds: string[] = [];
-        let totalIn = 0, totalOut = 0;
 
         // Iterative tool-calling loop. Each iteration may produce text + zero or more tool_use blocks.
         let messages = anthropicMessages.slice();
         const ant = await clientForUser(user.id);
         for (let iter = 0; iter < 6; iter++) {
+          const llmStart = Date.now();
           const stream2 = ant.messages.stream({
             model: DEFAULT_MODEL,
             max_tokens: 2048,
@@ -151,8 +186,23 @@ export async function POST(req: Request) {
             }
           }
           const final = await stream2.finalMessage();
+          const llmDuration = Date.now() - llmStart;
           totalIn += final.usage?.input_tokens || 0;
           totalOut += final.usage?.output_tokens || 0;
+          const cacheRead = (final.usage as any)?.cache_read_input_tokens || 0;
+          const cacheCreate = (final.usage as any)?.cache_creation_input_tokens || 0;
+          totalCacheRead += cacheRead;
+          totalCacheCreate += cacheCreate;
+          emitter.emit("llm_call", {
+            iter, model: DEFAULT_MODEL,
+            inputTokens: final.usage?.input_tokens || 0,
+            outputTokens: final.usage?.output_tokens || 0,
+            cacheReadTokens: cacheRead,
+            cacheCreationTokens: cacheCreate,
+            stopReason: final.stop_reason,
+          }, { durationMs: llmDuration });
+          if (cacheRead > 0) emitter.emit("cache_hit", { tokens: cacheRead });
+          else if (cacheCreate > 0) emitter.emit("cache_miss", { reason: "first_call_or_expired", createTokens: cacheCreate });
 
           // Resolve tool_use partials into JSON.
           for (const tu of turnToolUses) {
@@ -178,10 +228,26 @@ export async function POST(req: Request) {
           const toolResults: any[] = [];
           for (const tu of turnToolUses) {
             send({ type: "tool_use", name: tu.name, input: tu.input, id: tu.id });
+            emitter.emit("tool_call", { name: tu.name, args: tu.input, toolUseId: tu.id });
             const t0 = Date.now();
-            const result = await executeAnyTool(tu.name, tu.input, ctx, composioToolNames, builtinTools);
+            let result: string;
+            let success = true;
+            try {
+              result = await executeAnyTool(tu.name, tu.input, ctx, composioToolNames, builtinTools);
+            } catch (err: any) {
+              result = `Tool error: ${err?.message || err}`;
+              success = false;
+              emitter.emit("error", { source: "tool", name: tu.name, message: err?.message || String(err) });
+            }
             const dt = Date.now() - t0;
             send({ type: "tool_result", id: tu.id, result, durationMs: dt });
+            emitter.emit("tool_result", {
+              name: tu.name, success,
+              // Truncate to avoid blowing up trace storage on huge tool outputs
+              resultPreview: result.length > 500 ? result.slice(0, 500) + "…" : result,
+              resultLength: result.length,
+              toolUseId: tu.id,
+            }, { durationMs: dt });
             toolCallsPersisted.push({ name: tu.name, args: tu.input, result, durationMs: dt });
             toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: result });
           }
@@ -207,12 +273,41 @@ export async function POST(req: Request) {
         await chargeCredits(user.id, cost, "Chat", assistantMsg.id);
         await updateThread(threadId, user.id, { updatedAt: Date.now() });
 
-        send({ type: "done", messageId: assistantMsg.id, costCredits: cost });
+        send({ type: "done", messageId: assistantMsg.id, costCredits: cost, runId });
         controller.close();
+
+        // P28a — finalize trace. Don't block the response on this; we already
+        // closed the controller. Failures here are logged but never surfaced
+        // to the user.
+        try {
+          await emitter.flush();
+          await endRun(runId, {
+            status: "succeeded",
+            totalInputTokens: totalIn,
+            totalOutputTokens: totalOut,
+            totalCacheReadTokens: totalCacheRead,
+            totalCacheWriteTokens: totalCacheCreate,
+            totalCostCredits: cost,
+          });
+        } catch (traceErr) {
+          console.error("[trace finalize]", traceErr);
+        }
       } catch (e: any) {
         console.error("[chat]", e);
-        try { send({ type: "error", message: e?.message || String(e) }); } catch {}
+        try { send({ type: "error", message: e?.message || String(e), runId }); } catch {}
         controller.close();
+        try {
+          emitter.emit("error", { source: "chat_route", message: e?.message || String(e) });
+          await emitter.flush();
+          await endRun(runId, {
+            status: "failed",
+            totalInputTokens: totalIn,
+            totalOutputTokens: totalOut,
+            errorMessage: e?.message || String(e),
+          });
+        } catch (traceErr) {
+          console.error("[trace finalize on error]", traceErr);
+        }
       }
     },
   });
