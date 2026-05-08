@@ -1,10 +1,14 @@
 "use client";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 
 export default function IntegrationsPage() {
+  return <Suspense fallback={null}><IntegrationsInner /></Suspense>;
+}
+
+function IntegrationsInner() {
   const [connectors, setConnectors] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("connected");
