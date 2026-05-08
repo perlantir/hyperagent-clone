@@ -12,6 +12,7 @@ const NAV: NavLink[] = [
   { href: "/integrations", label: "Integrations", icon: "⊟" },
   { href: "/live",         label: "Live mode",    icon: "●" },
   { href: "/billing",      label: "Billing",      icon: "$" },
+  { href: "/settings",     label: "Settings",     icon: "⚙" },
 ];
 
 export function Sidebar() {
