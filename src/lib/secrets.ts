@@ -28,6 +28,7 @@ export const SECRET_PROVIDERS = [
   "gemini",        // Gemini 2.5 + Nano Banana + Veo — chat & media
   "hyperbrowser",  // Cloud Chromium — browser/computer-use
   "composio",      // 500+ third-party connectors
+  "e2b",           // Sandboxed code execution (Python, shell)
 ] as const;
 export type SecretProvider = typeof SECRET_PROVIDERS[number];
 
@@ -39,6 +40,7 @@ const ENV_FALLBACKS: Record<SecretProvider, string> = {
   gemini: "GEMINI_API_KEY",
   hyperbrowser: "HYPERBROWSER_API_KEY",
   composio: "COMPOSIO_API_KEY",
+  e2b: "E2B_API_KEY",
 };
 
 // User-facing metadata for the settings UI.
@@ -68,6 +70,10 @@ export const PROVIDER_META: Record<SecretProvider, {
   composio: {
     label: "Composio", description: "OAuth-managed connectors for 500+ apps (Slack, Gmail, GitHub, Notion…).",
     placeholder: "ak_...", helpUrl: "https://app.composio.dev",
+  },
+  e2b: {
+    label: "e2b", description: "Cloud sandboxes for code execution — Python, shell, file I/O.",
+    placeholder: "e2b_...", helpUrl: "https://e2b.dev/dashboard",
   },
 };
 

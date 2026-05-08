@@ -405,6 +405,82 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
       } catch (e: any) { return `generate_video error: ${e.message}`; }
     },
   },
+
+  // ============ SANDBOXED CODE EXECUTION (e2b) ============
+
+  code_interpreter: {
+    name: "code_interpreter",
+    description: `Execute Python code in a fresh, isolated cloud sandbox. Returns stdout, stderr, and the value of the last expression.
+
+When to use: data analysis, calculations, file processing, API calls, anything that requires actual computation rather than describing what the computation would do. The sandbox has pandas, numpy, requests, beautifulsoup4, matplotlib preinstalled. Network access is enabled.
+
+When NOT to use: code generation for the user to run elsewhere (just write the code as text), simple math (do it in your head), anything that doesn't need to actually execute.
+
+Each call gets a brand-new sandbox — there is NO state carried between calls. If you need multi-step computation, put it all in one code block.
+
+Tip: Use \`print()\` to surface intermediate values to stdout. The last expression in your code is also captured separately as 'result'.
+
+Pitfalls: Sandbox timeout is 60 seconds. Long-running tasks should be split or use timeouts inside the code. Output is truncated to 16KB stdout / 8KB stderr.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "Python code to execute. Must be self-contained — no imports persist across calls." },
+        timeoutMs: { type: "number", description: "Max execution time in ms (default 60000, max 120000)" },
+      },
+      required: ["code"],
+    },
+    async execute(args, ctx) {
+      try {
+        const { runPython } = await import("./sandbox");
+        const r = await runPython(args.code, {
+          userId: ctx.userId,
+          timeoutMs: Math.min(args.timeoutMs || 60_000, 120_000),
+        });
+        const parts = [];
+        if (r.stdout) parts.push(`stdout:\n${r.stdout}`);
+        if (r.stderr) parts.push(`stderr:\n${r.stderr}`);
+        if (r.result !== undefined) {
+          const resStr = typeof r.result === "string" ? r.result : JSON.stringify(r.result, null, 2);
+          parts.push(`result:\n${resStr}`);
+        }
+        parts.push(`(exit ${r.exitCode}, ${r.durationMs}ms)`);
+        return parts.join("\n\n");
+      } catch (e: any) { return `code_interpreter error: ${e.message}`; }
+    },
+  },
+
+  run_shell: {
+    name: "run_shell",
+    description: `Run a shell command in a fresh, isolated Ubuntu sandbox. Returns stdout + stderr + exit code.
+
+When to use: file operations, running CLI tools (curl, jq, ffmpeg), shell scripts, things easier in bash than in Python. Network is enabled.
+
+When NOT to use: anything that needs persistent state (each call is fresh), interactive commands (no TTY), or things you'd just write in Python.
+
+Pitfalls: Sandbox timeout 60s. No filesystem state persists between calls. Output truncated to 16KB stdout / 8KB stderr.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command (single line; use && or ; to chain)" },
+        timeoutMs: { type: "number" },
+      },
+      required: ["command"],
+    },
+    async execute(args, ctx) {
+      try {
+        const { runShell } = await import("./sandbox");
+        const r = await runShell(args.command, {
+          userId: ctx.userId,
+          timeoutMs: Math.min(args.timeoutMs || 60_000, 120_000),
+        });
+        const parts = [];
+        if (r.stdout) parts.push(`stdout:\n${r.stdout}`);
+        if (r.stderr) parts.push(`stderr:\n${r.stderr}`);
+        parts.push(`(exit ${r.exitCode}, ${r.durationMs}ms)`);
+        return parts.join("\n\n");
+      } catch (e: any) { return `run_shell error: ${e.message}`; }
+    },
+  },
 };
 
 // Anthropic-format tool spec
@@ -480,4 +556,6 @@ export const DEFAULT_AGENT_TOOLS = [
   "generate_image",
   "generate_speech",
   "generate_video",
+  "code_interpreter",
+  "run_shell",
 ];

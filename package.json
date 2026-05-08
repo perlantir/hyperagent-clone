@@ -1,6 +1,6 @@
 {
   "name": "hyperagent-clone",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.3",
+    "@liveblocks/client": "^2.21.1",
+    "@liveblocks/react": "^2.21.1",
     "next": "14.2.5",
     "pg": "^8.13.0",
     "react": "^18.3.1",
