@@ -12,6 +12,9 @@ import { computeCost, chargeCredits, balance } from "./credits";
 import { startRun, endRun, TraceEmitter } from "./traces";
 import { withRetry } from "./providers";
 import { setBudgetCap, DEFAULT_SCHEDULED_RUN_BUDGET } from "./budget";
+import { composeSystemPrompt } from "./prompt-segments";
+import { compilePrompt } from "./prompt-compiler";
+import { memoriesForContext } from "./memory";
 
 export async function runDueSchedules(): Promise<{ ran: number; skipped: number; errors: number }> {
   const schedules = await listAllActiveSchedules();
@@ -67,6 +70,26 @@ async function runSchedule(scheduleId: string) {
     const assistantMsg = await createMessage({ threadId: thread.id, role: "assistant", content: "" });
 
     const { tools } = await resolveAllTools(s.userId, agent.tools);
+
+    // P23 — layered prompt with cache_control breakpoints.
+    const memories = await memoriesForContext(s.userId, agent.id, null);
+    const segments = composeSystemPrompt({
+      agent,
+      toolNames: tools.map((t: any) => t.name),
+      pinnedMemories: memories.filter((m: any) => (m.importance || 0) >= 8),
+      contextualMemories: memories.filter((m: any) => (m.importance || 0) < 8),
+      threadContextDocId: null,
+    });
+    const compiled = compilePrompt(segments, { maxTokens: 16_000 });
+    emitter.setDefaultMetadata({
+      promptFingerprint: compiled.fingerprint,
+      agentId: agent.id,
+    });
+    emitter.emit("prompt_compiled", {
+      fingerprint: compiled.fingerprint, totalTokens: compiled.totalTokens,
+      blockCount: compiled.systemBlocks.length,
+    });
+
     const ant = await clientForUser(s.userId);
     const llmStart = Date.now();
     // P29 — retry transient failures (Anthropic 529, network blips). Auth
@@ -76,7 +99,7 @@ async function runSchedule(scheduleId: string) {
       () => ant.messages.create({
         model: DEFAULT_MODEL,
         max_tokens: 1024,
-        system: agent.systemPrompt,
+        system: compiled.systemBlocks as any,
         messages: [{ role: "user", content: s.prompt }],
         tools: tools as any,
       }),

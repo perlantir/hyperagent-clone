@@ -189,19 +189,90 @@ export function selectFallbackModel(
 
 // =================== LOOP DETECTION ===================
 
-// Detect when an iterative tool loop has stalled — same tools called with
-// same args repeatedly with no new text generated. Caller passes the per-iter
-// signature; this returns true when the last N iterations were identical.
+// Detect when an iterative tool loop has stalled. Catches three patterns:
+//
+//   1. Identical: same tool calls 3+ iterations with no new text.
+//   2. Alternating: ABABAB pattern of two distinct tool signatures with no text.
+//   3. Near-duplicate: tool args differ only in trivial whitespace/quoting (Levenshtein on the canonical signature).
+//
+// Returns a structured result so the caller can attribute the break in the
+// trace, not a raw boolean.
+
+export interface LoopDetection {
+  loop: boolean;
+  reason?: "identical" | "alternating" | "near_duplicate";
+  signature?: string;
+}
 
 export function detectLoop(
   history: Array<{ text: string; toolSig: string }>,
-  threshold = 3,
-): boolean {
-  if (history.length < threshold) return false;
-  const last = history.slice(-threshold);
-  const allSameSig = last.every(h => h.toolSig === last[0].toolSig);
-  const allEmptyText = last.every(h => h.text.trim().length === 0);
-  return allSameSig && allEmptyText && last[0].toolSig.length > 0;
+  opts: { threshold?: number; nearDuplicateThreshold?: number } = {},
+): LoopDetection {
+  const threshold = opts.threshold ?? 3;
+  const ndThreshold = opts.nearDuplicateThreshold ?? 0.92; // 92%+ similarity counts as duplicate
+  if (history.length < threshold) return { loop: false };
+
+  // Pattern 1: identical signatures + no text
+  const last3 = history.slice(-threshold);
+  if (last3.every(h => h.text.trim().length === 0)) {
+    if (last3.every(h => h.toolSig === last3[0].toolSig) && last3[0].toolSig.length > 0) {
+      return { loop: true, reason: "identical", signature: last3[0].toolSig };
+    }
+  }
+
+  // Pattern 2: alternating ABAB across the last 4 (need 4 turns of history)
+  if (history.length >= 4) {
+    const last4 = history.slice(-4);
+    const allEmpty = last4.every(h => h.text.trim().length === 0);
+    if (allEmpty
+        && last4[0].toolSig === last4[2].toolSig
+        && last4[1].toolSig === last4[3].toolSig
+        && last4[0].toolSig !== last4[1].toolSig
+        && last4[0].toolSig.length > 0
+        && last4[1].toolSig.length > 0) {
+      return { loop: true, reason: "alternating", signature: `${last4[0].toolSig} ↔ ${last4[1].toolSig}` };
+    }
+  }
+
+  // Pattern 3: near-duplicate via Levenshtein similarity
+  if (last3.every(h => h.text.trim().length === 0) && last3.every(h => h.toolSig.length > 0)) {
+    const sim01 = similarity(last3[0].toolSig, last3[1].toolSig);
+    const sim12 = similarity(last3[1].toolSig, last3[2].toolSig);
+    if (sim01 >= ndThreshold && sim12 >= ndThreshold) {
+      return { loop: true, reason: "near_duplicate", signature: last3[2].toolSig };
+    }
+  }
+
+  return { loop: false };
+}
+
+// Levenshtein-based similarity in [0, 1]. Uses a length-bounded edit distance
+// (caps at 200 chars) so signatures with huge tool args stay cheap to compare.
+function similarity(a: string, b: string): number {
+  const A = a.slice(0, 200);
+  const B = b.slice(0, 200);
+  if (A === B) return 1;
+  const maxLen = Math.max(A.length, B.length) || 1;
+  const dist = levenshtein(A, B);
+  return 1 - dist / maxLen;
+}
+
+function levenshtein(a: string, b: string): number {
+  const al = a.length, bl = b.length;
+  if (al === 0) return bl;
+  if (bl === 0) return al;
+  const v0 = new Array(bl + 1);
+  const v1 = new Array(bl + 1);
+  for (let i = 0; i <= bl; i++) v0[i] = i;
+  for (let i = 0; i < al; i++) {
+    v1[0] = i + 1;
+    for (let j = 0; j < bl; j++) {
+      const cost = a[i] === b[j] ? 0 : 1;
+      v1[j + 1] = Math.min(v1[j] + 1, v0[j + 1] + 1, v0[j] + cost);
+    }
+    for (let j = 0; j <= bl; j++) v0[j] = v1[j];
+  }
+  return v0[bl];
 }
 
 // =================== CONTEXT-OVERFLOW TRUNCATION ===================
@@ -215,11 +286,16 @@ export function detectLoop(
 //
 // Returns truncated messages and a count of what was removed.
 
+export interface TruncationResult {
+  messages: any[];
+  dropped: number;
+  summary?: string;       // human-readable summary of what got dropped, inserted as a system message
+}
+
 export function truncateMessages(
   messages: any[],
   maxApproxTokens: number,
-): { messages: any[]; dropped: number } {
-  // Quick estimate: avg 4 chars per token
+): TruncationResult {
   const approxTokens = (m: any) => {
     if (typeof m.content === "string") return Math.ceil(m.content.length / 4);
     if (Array.isArray(m.content)) {
@@ -228,34 +304,74 @@ export function truncateMessages(
         if (typeof b === "string") n += Math.ceil(b.length / 4);
         else if (b?.text) n += Math.ceil(b.text.length / 4);
         else if (b?.content) n += Math.ceil(JSON.stringify(b.content).length / 4);
-        else n += 50; // tool_use blocks etc.
+        else n += 50;
       }
       return n;
     }
     return 100;
   };
 
-  let total = messages.reduce((s, m) => s + approxTokens(m), 0);
+  const total = messages.reduce((s, m) => s + approxTokens(m), 0);
   if (total <= maxApproxTokens) return { messages, dropped: 0 };
 
-  // Always keep first user message and last 4 messages
+  // Keep first user message + last 4 messages. Compress the middle into a
+  // summary placeholder so the agent doesn't lose all sense of what
+  // happened — it sees a tool-call census of dropped iterations.
   const head = messages.slice(0, 1);
   const tail = messages.slice(-4);
   const middle = messages.slice(1, -4);
 
-  // Drop middle messages from the front until under budget
-  let dropped = 0;
+  let droppedMiddle: any[] = [];
   while (middle.length > 0) {
     const headTokens = head.reduce((s, m) => s + approxTokens(m), 0);
     const tailTokens = tail.reduce((s, m) => s + approxTokens(m), 0);
     const middleTokens = middle.reduce((s, m) => s + approxTokens(m), 0);
     if (headTokens + middleTokens + tailTokens <= maxApproxTokens) break;
-    middle.shift();
-    dropped++;
+    droppedMiddle.push(middle.shift());
   }
 
-  return {
-    messages: [...head, ...middle, ...tail],
-    dropped,
+  if (droppedMiddle.length === 0) {
+    return { messages, dropped: 0 };
+  }
+
+  // Build a compact summary of what we dropped. Counts tool calls by name
+  // and surfaces the last assistant turn's text (truncated).
+  const summary = summarizeDropped(droppedMiddle);
+  const summaryMsg = {
+    role: "user",
+    content: `[Earlier in this thread, ${droppedMiddle.length} message(s) were truncated to fit the context window. Summary of dropped content: ${summary}]`,
   };
+
+  return {
+    messages: [...head, summaryMsg, ...middle, ...tail],
+    dropped: droppedMiddle.length,
+    summary,
+  };
+}
+
+function summarizeDropped(dropped: any[]): string {
+  const toolCounts: Record<string, number> = {};
+  let lastAssistantText = "";
+  for (const m of dropped) {
+    if (Array.isArray(m.content)) {
+      for (const b of m.content) {
+        if (b?.type === "tool_use") {
+          toolCounts[b.name] = (toolCounts[b.name] || 0) + 1;
+        }
+        if (b?.type === "text" && b.text) {
+          lastAssistantText = b.text;
+        }
+      }
+    } else if (typeof m.content === "string" && m.role === "assistant") {
+      lastAssistantText = m.content;
+    }
+  }
+  const parts: string[] = [];
+  const toolList = Object.entries(toolCounts).map(([n, c]) => `${c}× ${n}`).join(", ");
+  if (toolList) parts.push(`tools: ${toolList}`);
+  if (lastAssistantText) {
+    const preview = lastAssistantText.replace(/\s+/g, " ").trim();
+    parts.push(`last assistant text: "${preview.slice(0, 200)}${preview.length > 200 ? "…" : ""}"`);
+  }
+  return parts.join(". ") || "no recoverable content";
 }

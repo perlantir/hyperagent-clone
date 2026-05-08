@@ -317,7 +317,11 @@ When NOT to use: between steps in the same task — keep the session alive to pr
     name: "computer_screenshot",
     description: `Take a screenshot of the virtual desktop (browser viewport). Same image as browser_screenshot but returns the artifact id reference for use in subsequent computer_* calls.
 
-When to use: pixel-precise computer-use workflows where you need to see the current state before issuing coordinate-based clicks/types.`,
+When to use: pixel-precise computer-use workflows where you need to see the current state before issuing coordinate-based clicks/types.
+
+When NOT to use: extracting text content (use browser_get_text — cheaper and more accurate). General page navigation (browser_screenshot is sufficient).
+
+Pitfalls: viewport defaults to 1280×720; coordinates in subsequent computer_click/computer_move calls must match this coordinate space.`,
     input_schema: { type: "object", properties: {} },
     async execute(_args, ctx) {
       try {
@@ -336,14 +340,22 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   computer_click: {
     name: "computer_click",
-    description: "Click at pixel coordinates (x, y) in the virtual desktop.",
+    description: `Click at pixel coordinates (x, y) in the virtual desktop. Use for pixel-precise interactions when CSS selectors aren't reliable.
+
+When to use: targeting elements that have no stable selector (canvas-rendered UIs, image maps), pixel-precise drag start positions, complex SPAs where DOM is opaque.
+
+When NOT to use: any element with a stable CSS selector — use browser_click instead. Selectors are more robust to viewport/scroll changes.
+
+Coordinate space: 1280×720 viewport (top-left origin). Take a computer_screenshot first to see what's at each position.
+
+Set double:true for double-clicks; button to "right"/"middle" for context menus or middle-click navigation.`,
     input_schema: {
       type: "object",
       properties: {
-        x: { type: "number" },
-        y: { type: "number" },
-        button: { type: "string", enum: ["left","right","middle"] },
-        double: { type: "boolean" },
+        x: { type: "number", description: "X pixel coordinate (0..1280)" },
+        y: { type: "number", description: "Y pixel coordinate (0..720)" },
+        button: { type: "string", enum: ["left","right","middle"], description: "Mouse button (default left)" },
+        double: { type: "boolean", description: "Double-click instead of single (default false)" },
       },
       required: ["x","y"],
     },
@@ -358,8 +370,19 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   computer_move: {
     name: "computer_move",
-    description: "Move the mouse to pixel coordinates without clicking.",
-    input_schema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x","y"] },
+    description: `Move the mouse to pixel coordinates without clicking.
+
+When to use: triggering hover-only UI (tooltips, dropdown menus that open on hover), positioning before a deliberate click.
+
+When NOT to use: standard navigation — browser_navigate is faster than scripted mouse movement.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        x: { type: "number", description: "X pixel coordinate" },
+        y: { type: "number", description: "Y pixel coordinate" },
+      },
+      required: ["x","y"],
+    },
     async execute(args, ctx) {
       try { await browser.mouseMove(ctx.userId, args.x, args.y); return `Moved to (${args.x},${args.y})`; }
       catch (e: any) { return `computer_move error: ${e.message}`; }
@@ -368,8 +391,18 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   computer_type: {
     name: "computer_type",
-    description: "Type text into the focused element (no selector needed). Use computer_click first to focus.",
-    input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    description: `Type text into whatever element is currently focused (no selector). Use computer_click first to focus a specific input.
+
+When to use: pixel-precise input flows where you've already focused an element via coordinates.
+
+When NOT to use: forms with stable selectors — browser_type is safer (auto-focuses by selector, less likely to type into the wrong element).
+
+Pitfalls: if focus is lost between focus and type (e.g., a modal opened), text goes to whatever has focus instead. Always verify state with computer_screenshot if uncertain.`,
+    input_schema: {
+      type: "object",
+      properties: { text: { type: "string", description: "Text to type into the currently-focused element" } },
+      required: ["text"],
+    },
     async execute(args, ctx) {
       try { await browser.keyboardType(ctx.userId, args.text); return `Typed ${args.text.length} chars`; }
       catch (e: any) { return `computer_type error: ${e.message}`; }
@@ -378,8 +411,20 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   computer_key: {
     name: "computer_key",
-    description: "Press a keyboard key — 'Enter', 'Tab', 'Escape', 'Meta+a', 'Control+c', etc.",
-    input_schema: { type: "object", properties: { key: { type: "string" } }, required: ["key"] },
+    description: `Press a keyboard key or modifier combination.
+
+When to use: keyboard shortcuts (Cmd+A, Control+C, Meta+Shift+P), accessibility flows where actions are keyboard-only, modal dismissal (Escape).
+
+Modifier syntax: "Meta+a" (Cmd-A on Mac), "Control+c", "Shift+Tab", "Alt+ArrowLeft". Combine with + delimiter.
+
+Single keys: "Enter", "Tab", "Escape", "ArrowUp/Down/Left/Right", "Backspace", "Home", "End".
+
+For literal text input, use computer_type or browser_type. This is for control keys only.`,
+    input_schema: {
+      type: "object",
+      properties: { key: { type: "string", description: "Key name or modifier combo (e.g. 'Enter', 'Meta+a', 'Control+Shift+c')" } },
+      required: ["key"],
+    },
     async execute(args, ctx) {
       try { await browser.pressKey(ctx.userId, args.key); return `Pressed ${args.key}`; }
       catch (e: any) { return `computer_key error: ${e.message}`; }
@@ -390,13 +435,19 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   upload_file_to_page: {
     name: "upload_file_to_page",
-    description: "Upload a file to a file-input on the current page. Pass a publicly accessible URL of the file plus the CSS selector of the <input type=file>.",
+    description: `Upload a file to an <input type=file> element on the current browser page.
+
+When to use: filling forms that require document/image attachments — application portals, expense report uploaders, image-edit tools.
+
+Inputs: a publicly accessible fileUrl, the CSS selector of the file input, and the desired filename Hyperbrowser will present to the page.
+
+Pitfalls: the file URL must be reachable from Hyperbrowser's egress (signed S3/R2 URLs work; localhost does not). Many sites validate file size/type/MIME — uploads that pass our tool can still be rejected by the page's JS validation. Watch for that in browser_get_text after upload.`,
     input_schema: {
       type: "object",
       properties: {
-        selector: { type: "string" },
-        fileUrl: { type: "string" },
-        filename: { type: "string" },
+        selector: { type: "string", description: "CSS selector of <input type=file>" },
+        fileUrl: { type: "string", description: "Publicly reachable file URL" },
+        filename: { type: "string", description: "Filename presented to the page" },
       },
       required: ["selector","fileUrl","filename"],
     },
@@ -410,8 +461,18 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   download_file: {
     name: "download_file",
-    description: "Download a file from a URL and capture it. Returns the downloaded URL + filename.",
-    input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    description: `Download a file from a URL and capture it for downstream use. Returns the downloaded URL + filename for reference in subsequent tool calls.
+
+When to use: capturing exports, generated reports, files behind a Save button click, screenshots from third-party tools.
+
+When NOT to use: viewing/reading a file inline — for HTML pages or text content use browser_navigate + browser_get_text instead.
+
+Pitfalls: large files may exceed sandbox storage. PDFs/spreadsheets that need parsing should be downloaded then processed via code_interpreter (pandas, pypdf, openpyxl).`,
+    input_schema: {
+      type: "object",
+      properties: { url: { type: "string", description: "Direct file URL" } },
+      required: ["url"],
+    },
     async execute(args, ctx) {
       try {
         const r = await browser.downloadFile(ctx.userId, args.url);
@@ -424,12 +485,25 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   generate_image: {
     name: "generate_image",
-    description: "Generate an image from a text prompt. Provider (gemini/openai/grok) defaults to user preference but can be overridden. Saves as image artifact.",
+    description: `Generate an image from a text prompt. Saved as an inline image artifact in the thread.
+
+When to use: hero images for reports, mood-board concepts, product mock-ups, infographic illustrations, anything where a generated image adds more than describing-in-words would.
+
+When NOT to use: factual photography (real people, real places — use SearchImages on real subjects). Diagrams or charts (use generate_artifact with HTML/SVG instead — vector, editable, accurate).
+
+Provider trade-offs:
+- gemini (Nano Banana): fast (~3s), cheap, good photorealism, supports image editing via inputImages
+- openai (gpt-image-1): sharpest text rendering, best for posters/UI mock-ups, slower (~15s)
+- grok (Aurora): xAI's distinctive style, good for stylized/illustrative outputs
+
+Tip: write specific prompts with subject + style + composition + lighting. "A photorealistic close-up of a vintage typewriter on a wood desk, soft morning light, shallow depth of field" beats "typewriter".
+
+Pitfalls: prompts containing real public figures may be filtered. Brand logos may be rejected. For brand work, use real reference images via inputImages (Gemini path).`,
     input_schema: {
       type: "object",
       properties: {
-        prompt: { type: "string", description: "What to draw. Be specific about subject, style, composition." },
-        aspectRatio: { type: "string", enum: ["1:1","16:9","9:16","4:3","3:4"] },
+        prompt: { type: "string", description: "Image description: subject + style + composition + lighting" },
+        aspectRatio: { type: "string", enum: ["1:1","16:9","9:16","4:3","3:4"], description: "Output aspect ratio (default 1:1)" },
         provider: { type: "string", enum: ["gemini","openai","grok"], description: "Override the user's default image provider" },
       },
       required: ["prompt"],
@@ -455,12 +529,24 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   generate_speech: {
     name: "generate_speech",
-    description: "Convert text to speech. Provider (gemini/openai) defaults to user preference. Saves as audio artifact.",
+    description: `Convert text to speech. Saved as an inline audio artifact with a player.
+
+When to use: voice-over scripts, podcast intros, accessibility (read-aloud version of an article), automated phone-system prompts, voicemail templates.
+
+When NOT to use: long-form audio over 5 minutes — split into chunks first. Multi-speaker dialogue without identifying speakers (Gemini supports multi-speaker; pass distinct voices per turn — but the simple text→speech surface here is single-voice).
+
+Provider trade-offs:
+- gemini: 30+ voices including non-English, natural prosody, supports multi-speaker dialogue mode
+- openai (tts-1): 6 voices (alloy, echo, fable, onyx, nova, shimmer), cleaner-sounding for narration
+
+Voice selection tips: alloy/echo (neutral US), fable (British), onyx (deep male), nova (warm female), shimmer (warm female alt). Gemini's Kore/Charon/Puck have distinct personalities.
+
+Pitfalls: pronunciation of proper nouns can be off. Numbers read as digits ("one two three") not words ("123") unless you spell them out.`,
     input_schema: {
       type: "object",
       properties: {
-        text: { type: "string" },
-        voice: { type: "string" },
+        text: { type: "string", description: "Text to speak. Up to ~5000 chars; split longer." },
+        voice: { type: "string", description: "Voice name (provider-specific). Defaults: alloy (openai), Kore (gemini)." },
         provider: { type: "string", enum: ["gemini","openai"] },
       },
       required: ["text"],
@@ -486,11 +572,23 @@ When to use: pixel-precise computer-use workflows where you need to see the curr
 
   generate_video: {
     name: "generate_video",
-    description: "Generate a short video. Provider (gemini Veo / openai Sora). Async — returns operation id.",
+    description: `Generate a short video clip from a text prompt. Async — returns an operation ID immediately; the video appears as an artifact when the provider finishes (1–5 min typical).
+
+When to use: product reveals, ad concepts, animated illustrations, showing motion that a still image can't convey.
+
+When NOT to use: long-form video (>10 sec) — these are clip generators. Lectures or talking-head video (use HeyGen avatar tooling instead, available via SearchIntegrations). Visual diff/comparison (a side-by-side still is clearer).
+
+Provider trade-offs:
+- gemini (Veo 3.1): 4–8 sec clips, native audio, good cinematic camera moves, ~1 min generation
+- openai (Sora-2): higher fidelity, supports up to 8 sec, slower (~3 min generation)
+
+Prompt structure: [Subject] + [Action] + [Scene] + [Style] + [Camera]. Example: "A red sports car drifting through a rain-soaked city street at night, neon reflections, cinematic dolly shot".
+
+Pitfalls: real people generation is restricted. Branded products may be rejected. Output isn't deterministic — same prompt produces different clips each call.`,
     input_schema: {
       type: "object",
       properties: {
-        prompt: { type: "string" },
+        prompt: { type: "string", description: "Video description: subject + action + scene + style + camera" },
         provider: { type: "string", enum: ["gemini","openai"] },
       },
       required: ["prompt"],

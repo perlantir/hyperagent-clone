@@ -1,8 +1,10 @@
 // P29 — Idempotency keys for replay-safe operations.
 //
 // Three places this matters today:
-//   1. Stripe webhooks — Stripe retries on 5xx for up to 3 days. Without dedup
-//      by event.id, a single $20 purchase credits the user 5x.
+//   1. Stripe webhooks — Stripe retries on 5xx for up to 3 days, but the
+//      official guidance is to dedup by event.id permanently in case a
+//      retry happens beyond their window or via support replay. We default
+//      Stripe namespace to 30 days.
 //   2. Cron runs — Vercel may fire a cron twice during deploys or retries.
 //      Without dedup by (cronPath + minute), scheduled agents run twice.
 //   3. User double-clicks — same key submitted twice in quick succession.
@@ -12,12 +14,21 @@
 //   - First call: insert key + run handler + cache result
 //   - Subsequent calls: return cached result without re-running
 //
-// Keys are scoped by `namespace` so different surfaces can't collide.
-// TTL defaults to 7 days; old rows can be pruned by the cron sweeper.
+// Inline GC: with 1% probability per call, prune expired rows. Belt and
+// suspenders against a broken cron — the table never grows unbounded even
+// if the hourly sweeper stops running.
 
 import { pool } from "./db";
 
 let _initialized = false;
+let _lastInlinePruneAt = 0;
+
+// Per-namespace defaults. Caller can override via opts.ttlSeconds.
+const NAMESPACE_DEFAULT_TTL_SECONDS: Record<string, number> = {
+  stripe_webhook: 30 * 24 * 3600,    // 30 days — Stripe recommends permanent
+  cron: 600,                          // 10 minutes
+  default: 7 * 24 * 3600,             // 7 days
+};
 
 async function ensureSchema() {
   if (_initialized) return;
@@ -28,7 +39,7 @@ async function ensureSchema() {
       "createdAt" BIGINT NOT NULL,
       "expiresAt" BIGINT NOT NULL,
       result JSONB,
-      status TEXT NOT NULL DEFAULT 'pending',  -- 'pending' | 'completed' | 'failed'
+      status TEXT NOT NULL DEFAULT 'pending',
       PRIMARY KEY (namespace, key)
     );
     CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_log("expiresAt");
@@ -36,29 +47,43 @@ async function ensureSchema() {
   _initialized = true;
 }
 
-export interface IdempotencyOptions {
-  namespace: string;        // e.g. "stripe_webhook", "cron"
-  key: string;              // e.g. event.id, "cron:2026-05-08T19:00"
-  ttlSeconds?: number;       // default 7 days
+// Inline GC: 1% chance per call, but at most once per minute per process.
+// Belt-and-suspenders against a broken cron sweeper.
+async function maybeInlinePrune(): Promise<void> {
+  if (Math.random() > 0.01) return;
+  if (Date.now() - _lastInlinePruneAt < 60_000) return;
+  _lastInlinePruneAt = Date.now();
+  try {
+    await pool().query(
+      `DELETE FROM idempotency_log WHERE "expiresAt" < $1`,
+      [Date.now()],
+    );
+  } catch (e) {
+    console.error("[idempotency inline prune]", e);
+  }
 }
 
-// Run `fn` exactly once for a given (namespace, key). Subsequent calls within
-// the TTL return the cached result without re-running fn.
-//
-// The cached `result` is whatever fn() returned. If fn() throws, we record
-// the failure and don't cache — the next call will retry. (Different from
-// Stripe's at-most-once semantics; the platform-level "successful processing"
-// is still best-effort.)
+export interface IdempotencyOptions {
+  namespace: string;
+  key: string;
+  ttlSeconds?: number;       // override default
+}
+
+function defaultTtl(namespace: string): number {
+  return NAMESPACE_DEFAULT_TTL_SECONDS[namespace] || NAMESPACE_DEFAULT_TTL_SECONDS.default;
+}
+
 export async function withIdempotency<T>(
   opts: IdempotencyOptions,
   fn: () => Promise<T>,
 ): Promise<{ result: T; replayed: boolean }> {
   await ensureSchema();
-  const ttl = (opts.ttlSeconds ?? 7 * 24 * 3600) * 1000;
+  // Best-effort inline GC; don't block the operation
+  maybeInlinePrune().catch(() => {});
+
+  const ttl = (opts.ttlSeconds ?? defaultTtl(opts.namespace)) * 1000;
   const now = Date.now();
 
-  // Try to claim the key. ON CONFLICT DO NOTHING so concurrent calls race
-  // safely — only one wins and runs fn().
   const claim = await pool().query(
     `INSERT INTO idempotency_log (namespace, key, "createdAt", "expiresAt", status)
      VALUES ($1, $2, $3, $4, 'pending')
@@ -69,7 +94,6 @@ export async function withIdempotency<T>(
   const claimed = claim.rows.length > 0;
 
   if (!claimed) {
-    // Someone else (or our past self) holds this key. Look up cached result.
     const r = await pool().query(
       `SELECT status, result, "expiresAt" FROM idempotency_log
        WHERE namespace=$1 AND key=$2`,
@@ -77,29 +101,21 @@ export async function withIdempotency<T>(
     );
     const row = r.rows[0];
     if (!row) {
-      // Key disappeared between INSERT and SELECT (unlikely but possible).
-      // Treat as fresh and run.
       return runAndStore(opts, fn);
     }
     if (row.status === "pending" && Number(row.expiresAt) > now) {
-      // Another worker is still running. We could wait, but for webhooks
-      // it's better to return success quickly so Stripe doesn't retry. Treat
-      // as a successful replay (the original handler is processing).
       return { result: { processing: true } as any, replayed: true };
     }
     if (row.status === "completed" && row.result) {
       return { result: row.result as T, replayed: true };
     }
     if (row.status === "failed") {
-      // Past failure — let this caller retry by deleting the failed row and
-      // re-claiming. Concurrent retry-of-failed is fine.
       await pool().query(
         `DELETE FROM idempotency_log WHERE namespace=$1 AND key=$2 AND status='failed'`,
         [opts.namespace, opts.key],
       );
       return runAndStore(opts, fn);
     }
-    // Expired — treat as fresh
     return runAndStore(opts, fn);
   }
 
@@ -128,7 +144,6 @@ async function runAndStore<T>(
   }
 }
 
-// Sweeper — remove rows past their TTL. Called from /api/cron for periodic GC.
 export async function pruneExpiredIdempotency(): Promise<number> {
   await ensureSchema();
   const r = await pool().query(

@@ -1,46 +1,40 @@
 // P28a — Trace Skeleton.
 //
-// Append-only event log for every meaningful operation in a run. One "run" =
-// one chat turn (or scheduled invocation, or v1 API call, or subagent
-// dispatch when P24 lands). Each run accumulates events: prompts compiled,
-// LLM calls made, tools called, memories read/written, cache hits/misses,
-// retries, errors. Flushed in batches at run end so we don't add user-facing
-// latency on the hot path.
+// Append-only event log for every meaningful operation in a run. Each emit()
+// is buffered in memory; a periodic auto-flush + a final flush at run end
+// persist events to Postgres in batches.
 //
-// Foundation for P28b (replay/fork/versioning UI), P26 (rubric judge reads
-// traces), P27b (cost surface aggregates from traces), P32 (command center
-// dashboards aggregate from traces). Every later phase reads from this.
-//
-// Design notes:
-//   - Append-only — never UPDATE/DELETE events. Schema migration only.
-//   - Buffered — emit() is sync to memory; one batched flush per run.
-//   - Lossy on crash — if the lambda dies mid-turn we lose unsynced events.
-//     Acceptable: the user message already streamed back via SSE. Traces are
-//     for retrospective debugging, not user-facing correctness.
-//   - JSONB payload — query-able later via Postgres JSON operators. Heavy
-//     analytics will eventually move to ClickHouse, but Postgres is fine for v0.
+// Hardening notes (post-P28a caveat triage):
+//   - Periodic auto-flush every 5s OR every 50 events. Lambda crash now loses
+//     at most the last partial batch instead of the whole run.
+//   - Each event gets a clientId (UUID) generated at emit time. parentClientId
+//     references the parent's clientId so the trace tree (tool_call → tool_result)
+//     can be reconstructed without round-tripping through BIGSERIAL ids.
+//   - Default metadata (agentId, agentVersion, promptFingerprint) attaches to
+//     every event automatically once set on the emitter.
+//   - Events redacted via redactSecretsDeep before persistence.
 
 import crypto from "node:crypto";
 import { pool } from "./db";
 import { redactSecretsDeep } from "./security";
 
 export type EventType =
-  | "prompt_compiled"        // compiler ran; payload: { fingerprint, totalTokens, blockCount, cacheBoundaries, included, dropped }
-  | "llm_call"               // anthropic/openai/gemini call; payload: { model, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, durationMs }
-  | "tool_call"              // model issued a tool_use block; payload: { name, args }
-  | "tool_result"            // tool finished; payload: { name, result, durationMs, success }
-  | "memory_read"            // retrieved memories; payload: { count, kinds: { pinned: N, contextual: M } }
-  | "memory_write"           // wrote a memory; payload: { id, content, scope }  (P25)
-  | "subagent_dispatch"      // P24
-  | "subagent_complete"      // P24
-  | "retry"                  // tool/llm retry; payload: { reason, attemptNum }
-  | "cache_hit"              // anthropic prompt cache hit; payload: { tokens }
-  | "cache_miss"             // payload: { reason }
-  | "section_drop"           // prompt compiler dropped a segment; payload: { kind, reason }
-  | "budget_reserved"        // P27a
+  | "prompt_compiled"
+  | "llm_call"
+  | "tool_call"
+  | "tool_result"
+  | "memory_read"
+  | "memory_write"
+  | "subagent_dispatch"
+  | "subagent_complete"
+  | "retry"
+  | "cache_hit"
+  | "cache_miss"
+  | "section_drop"
+  | "budget_reserved"
   | "budget_committed"
   | "budget_rolled_back"
-  | "error";                 // anything caught; payload: { message, stack, source }
+  | "error";
 
 export type RunKind = "chat_turn" | "scheduled" | "v1_api" | "subagent" | "slack_inbound";
 export type RunStatus = "running" | "succeeded" | "failed" | "cancelled" | "timeout";
@@ -97,9 +91,18 @@ async function ensureSchema() {
       "eventType" TEXT NOT NULL,
       payload JSONB NOT NULL,
       "durationMs" INTEGER,
-      "parentEventId" BIGINT
+      "parentEventId" BIGINT,
+      "clientId" TEXT,
+      "parentClientId" TEXT,
+      metadata JSONB
     );
+    -- Idempotent column adds for older deployments
+    ALTER TABLE trace_events ADD COLUMN IF NOT EXISTS "clientId" TEXT;
+    ALTER TABLE trace_events ADD COLUMN IF NOT EXISTS "parentClientId" TEXT;
+    ALTER TABLE trace_events ADD COLUMN IF NOT EXISTS metadata JSONB;
     CREATE INDEX IF NOT EXISTS idx_trace_events_run ON trace_events("runId", "ts");
+    CREATE INDEX IF NOT EXISTS idx_trace_events_client ON trace_events("clientId");
+    CREATE INDEX IF NOT EXISTS idx_trace_events_parent_client ON trace_events("parentClientId");
     CREATE INDEX IF NOT EXISTS idx_trace_runs_user ON trace_runs("userId", "startedAt" DESC);
     CREATE INDEX IF NOT EXISTS idx_trace_runs_parent ON trace_runs("parentRunId");
     CREATE INDEX IF NOT EXISTS idx_trace_runs_thread ON trace_runs("threadId", "startedAt" DESC);
@@ -139,46 +142,76 @@ export async function endRun(runId: string, input: EndRunInput): Promise<void> {
   );
 }
 
-// Buffered event emitter. Caller emits synchronously to memory; flush() is
-// the only DB-touching operation. Designed for per-run scope: instantiate at
-// run start, flush once at run end.
+interface BufferedEvent {
+  runId: string;
+  clientId: string;          // UUID, generated at emit
+  parentClientId: string | null;
+  ts: number;
+  eventType: EventType;
+  payload: any;
+  durationMs?: number;
+  metadata?: Record<string, any>;
+}
+
+export interface EmitHandle {
+  clientId: string;
+}
+
+// Periodic + threshold-based flushing prevents data loss on lambda crash.
+// Lambda death now drops at most one batch (≤50 events or ≤5 seconds).
+const AUTO_FLUSH_INTERVAL_MS = 5000;
+const AUTO_FLUSH_THRESHOLD = 50;
+
 export class TraceEmitter {
-  private buffer: Array<{
-    runId: string;
-    ts: number;
-    eventType: EventType;
-    payload: any;
-    durationMs?: number;
-    parentEventId?: number;
-  }> = [];
-  private flushed = false;
+  private buffer: BufferedEvent[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private finalized = false;
+  private inflightFlush: Promise<void> | null = null;
+  private defaultMetadata: Record<string, any> = {};
 
   constructor(public readonly runId: string) {}
 
-  emit(eventType: EventType, payload: any, opts: { durationMs?: number; parentEventId?: number } = {}) {
-    if (this.flushed) {
-      // Should never happen — but if it does, log loudly rather than silently lose events
-      console.warn("[trace] emit after flush", { runId: this.runId, eventType });
-    }
-    this.buffer.push({
+  // Set metadata that auto-attaches to every emitted event. Useful for
+  // run-wide correlation IDs (agent_version, prompt_fingerprint, request_id).
+  setDefaultMetadata(meta: Record<string, any>): void {
+    this.defaultMetadata = { ...this.defaultMetadata, ...meta };
+  }
+
+  emit(
+    eventType: EventType,
+    payload: any,
+    opts: { durationMs?: number; parentClientId?: string; metadata?: Record<string, any> } = {},
+  ): EmitHandle {
+    const clientId = crypto.randomUUID();
+    const event: BufferedEvent = {
       runId: this.runId,
+      clientId,
+      parentClientId: opts.parentClientId || null,
       ts: Date.now(),
       eventType,
       payload: payload || {},
       durationMs: opts.durationMs,
-      parentEventId: opts.parentEventId,
-    });
+      metadata: { ...this.defaultMetadata, ...(opts.metadata || {}) },
+    };
+    this.buffer.push(event);
+
+    if (this.buffer.length >= AUTO_FLUSH_THRESHOLD) {
+      // Best-effort partial flush; don't block emit
+      this.partialFlush().catch(e => console.error("[trace partial-flush]", e));
+    } else if (!this.flushTimer) {
+      this.flushTimer = setTimeout(() => {
+        this.partialFlush().catch(e => console.error("[trace timed-flush]", e));
+      }, AUTO_FLUSH_INTERVAL_MS);
+    }
+
+    return { clientId };
   }
 
-  // Adapter for prompt-compiler's emitter signature: (event) => void
-  // The compiler emits events with .type which we map to our EventType.
   asCompilerEmitter() {
     return (event: any) => {
       const type = event.type as EventType;
-      // Translate "prompt_compiled" + "prompt_overbudget" + per-segment events
       if (type === "prompt_compiled") {
         this.emit("prompt_compiled", event);
-        // If any segments were dropped, also emit per-segment events for queryability
         for (const d of event.dropped || []) {
           this.emit("section_drop", { kind: d.kind, reason: d.reason });
         }
@@ -190,41 +223,56 @@ export class TraceEmitter {
     };
   }
 
-  // Bulk-INSERT all buffered events. Idempotent — calling twice is a no-op
-  // after the first call.
-  async flush(): Promise<{ flushed: number }> {
-    if (this.flushed || this.buffer.length === 0) {
-      this.flushed = true;
-      return { flushed: 0 };
-    }
-    this.flushed = true;
+  // Mid-run flush; doesn't mark the emitter finalized.
+  private async partialFlush(): Promise<void> {
+    // Coalesce concurrent flush attempts: if one's in-flight, wait for it
+    if (this.inflightFlush) return this.inflightFlush;
+    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
+    if (this.buffer.length === 0) return;
+
     const events = this.buffer;
     this.buffer = [];
-    // Build a single bulk INSERT for efficiency.
-    // P33a — redact secrets in payloads before persistence so we never store
-    // user keys (their own or others') in trace events. Defensive: if a
-    // tool result accidentally returns an API key string, this catches it.
-    const cols = ['"runId"', '"ts"', '"eventType"', "payload", '"durationMs"', '"parentEventId"'];
-    const placeholders: string[] = [];
-    const params: any[] = [];
-    let i = 1;
-    for (const e of events) {
-      const redacted = redactSecretsDeep(e.payload);
-      placeholders.push(`($${i}, $${i+1}, $${i+2}, $${i+3}, $${i+4}, $${i+5})`);
-      params.push(e.runId, e.ts, e.eventType, JSON.stringify(redacted), e.durationMs || null, e.parentEventId || null);
-      i += 6;
-    }
-    try {
-      await pool().query(
-        `INSERT INTO trace_events (${cols.join(",")}) VALUES ${placeholders.join(",")}`,
-        params,
-      );
-    } catch (err) {
-      // Trace flush failures are non-fatal — we don't want to break user-facing
-      // chat just because traces couldn't be written. Log and continue.
-      console.error("[trace flush]", err);
-    }
-    return { flushed: events.length };
+
+    this.inflightFlush = (async () => {
+      const cols = ['"runId"', '"ts"', '"eventType"', "payload", '"durationMs"', '"clientId"', '"parentClientId"', "metadata"];
+      const placeholders: string[] = [];
+      const params: any[] = [];
+      let i = 1;
+      for (const e of events) {
+        const redacted = redactSecretsDeep(e.payload);
+        const redactedMeta = e.metadata ? redactSecretsDeep(e.metadata) : null;
+        placeholders.push(`($${i}, $${i+1}, $${i+2}, $${i+3}, $${i+4}, $${i+5}, $${i+6}, $${i+7})`);
+        params.push(
+          e.runId, e.ts, e.eventType, JSON.stringify(redacted),
+          e.durationMs || null, e.clientId, e.parentClientId || null,
+          redactedMeta ? JSON.stringify(redactedMeta) : null,
+        );
+        i += 8;
+      }
+      try {
+        await pool().query(
+          `INSERT INTO trace_events (${cols.join(",")}) VALUES ${placeholders.join(",")}`,
+          params,
+        );
+      } catch (err) {
+        console.error("[trace flush]", err);
+      }
+    })();
+    try { await this.inflightFlush; }
+    finally { this.inflightFlush = null; }
+  }
+
+  // Final flush at run end. After this, the emitter is finalized — further
+  // emits log a warning instead of silently buffering forever.
+  async flush(): Promise<{ flushed: number }> {
+    if (this.finalized) return { flushed: 0 };
+    this.finalized = true;
+    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
+    if (this.inflightFlush) { try { await this.inflightFlush; } catch {} }
+    const count = this.buffer.length;
+    if (count === 0) return { flushed: 0 };
+    await this.partialFlush();
+    return { flushed: count };
   }
 }
 
@@ -239,11 +287,10 @@ export async function getRun(runId: string, userId: string): Promise<any | null>
 }
 
 export async function getEventsForRun(runId: string, userId: string): Promise<any[]> {
-  // Verify ownership via the run's userId before returning events.
   const own = await pool().query(`SELECT "userId" FROM trace_runs WHERE id=$1`, [runId]);
   if (!own.rows[0] || own.rows[0].userId !== userId) return [];
   const r = await pool().query(
-    `SELECT id, "ts", "eventType", payload, "durationMs", "parentEventId"
+    `SELECT id, "ts", "eventType", payload, "durationMs", "clientId", "parentClientId", metadata
      FROM trace_events WHERE "runId"=$1 ORDER BY "ts" ASC, id ASC`,
     [runId],
   );

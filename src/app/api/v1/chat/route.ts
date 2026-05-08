@@ -9,7 +9,9 @@ import crypto from "node:crypto";
 import { pool, createMessage, createThread, getAgent, updateMessage } from "@/lib/db";
 import { clientForUser, DEFAULT_MODEL } from "@/lib/llm";
 import { resolveAllTools } from "@/lib/tools";
-import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
+import { memoriesForContext } from "@/lib/memory";
+import { composeSystemPrompt } from "@/lib/prompt-segments";
+import { compilePrompt } from "@/lib/prompt-compiler";
 import { computeCost, chargeCredits, balance } from "@/lib/credits";
 import { startRun, endRun, TraceEmitter } from "@/lib/traces";
 import { withRetry } from "@/lib/providers";
@@ -93,9 +95,19 @@ export async function POST(req: Request) {
 
   const agent = agentId ? await getAgent(agentId, userId) : null;
   const memories = await memoriesForContext(userId, agentId, null);
-  const system = (agent?.systemPrompt || "You are a helpful AI assistant.") + memoriesAsSystemBlock(memories);
   const toolNames = agent?.tools || ["web_search", "generate_artifact"];
   const { tools } = await resolveAllTools(userId, toolNames);
+
+  // P23 — layered prompt with cache_control breakpoints.
+  const segments = composeSystemPrompt({
+    agent,
+    toolNames: tools.map((t: any) => t.name),
+    pinnedMemories: memories.filter((m: any) => (m.importance || 0) >= 8),
+    contextualMemories: memories.filter((m: any) => (m.importance || 0) < 8),
+    threadContextDocId: null, // P24 wires this
+  });
+  const compiled = compilePrompt(segments, { maxTokens: 16_000 });
+  const systemBlocks = compiled.systemBlocks;
 
   // P28a — start trace for this v1 API call.
   const traceRunId = await startRun({
@@ -104,6 +116,22 @@ export async function POST(req: Request) {
     kind: "v1_api",
   });
   const emitter = new TraceEmitter(traceRunId);
+  emitter.setDefaultMetadata({
+    promptFingerprint: compiled.fingerprint,
+    agentId: agentId || null,
+    requestId: req.headers.get("x-request-id") || req.headers.get("x-vercel-id") || null,
+  });
+  emitter.emit("prompt_compiled", {
+    fingerprint: compiled.fingerprint,
+    totalTokens: compiled.totalTokens,
+    blockCount: compiled.systemBlocks.length,
+    cacheBoundaries: compiled.systemBlocks.filter(b => (b as any).cache_control).length,
+  });
+  emitter.emit("memory_read", {
+    count: memories.length,
+    pinnedCount: memories.filter((m: any) => (m.importance || 0) >= 8).length,
+    contextualCount: memories.filter((m: any) => (m.importance || 0) < 8).length,
+  });
 
   // P27a — budget cap for v1 calls.
   await setBudgetCap(traceRunId, DEFAULT_V1_CALL_BUDGET);
@@ -122,7 +150,7 @@ export async function POST(req: Request) {
       () => ant.messages.create({
         model: DEFAULT_MODEL,
         max_tokens: 2048,
-        system,
+        system: systemBlocks as any,
         messages: [{ role: "user", content: message }],
         tools: tools as any,
       }),

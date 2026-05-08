@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "test:prompt": "npx tsx src/lib/__tests__/prompt-compiler.test.ts"
+    "test:prompt": "npx tsx src/lib/__tests__/prompt-compiler.test.ts",
+    "test:providers": "npx tsx src/lib/__tests__/providers.test.ts",
+    "test:all": "npm run test:prompt && npm run test:providers"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.3",

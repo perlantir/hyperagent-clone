@@ -116,6 +116,14 @@ export async function POST(req: Request) {
     metadata: { useRouter: !!useRouter, routerNote },
   });
   const emitter = new TraceEmitter(runId);
+  // P28a hardening — attach run-wide metadata to every emitted event so trace
+  // queries can filter/correlate without joining back to the run record.
+  emitter.setDefaultMetadata({
+    promptFingerprint: compiled.fingerprint,
+    agentId: agentId || null,
+    agentVersion: (agent as any)?.version || 1,
+    requestId: req.headers.get("x-request-id") || req.headers.get("x-vercel-id") || null,
+  });
 
   // P27a — set the per-turn budget cap. Hard server-side limit prevents a
   // runaway agent (recursive subagents, infinite tool loops, malicious prompts)
@@ -259,14 +267,21 @@ export async function POST(req: Request) {
             .map(tu => `${tu.name}:${JSON.stringify(tu.input)}`)
             .sort().join("|");
           iterHistory.push({ text: turnText, toolSig });
-          if (detectLoop(iterHistory, 3)) {
+          const loopCheck = detectLoop(iterHistory);
+          if (loopCheck.loop) {
             emitter.emit("error", {
               source: "loop_detector",
-              message: "Same tool calls 3+ iterations with no new text. Breaking loop.",
-              lastToolSig: toolSig,
+              reason: loopCheck.reason,
+              message: `Loop detected (${loopCheck.reason}). Breaking.`,
+              signature: loopCheck.signature,
             });
-            send({ type: "delta", text: "\n\n[Stopping — agent is looping on the same tool calls. Try rephrasing or restarting.]" });
-            accumulatedText += "\n\n[Stopping — agent is looping on the same tool calls. Try rephrasing or restarting.]";
+            const reasonText =
+              loopCheck.reason === "alternating" ? "alternating between two tools"
+              : loopCheck.reason === "near_duplicate" ? "near-duplicate tool calls"
+              : "same tool calls 3+ times with no new text";
+            const stopMsg = `\n\n[Stopping — agent is looping (${reasonText}). Try rephrasing or restarting.]`;
+            send({ type: "delta", text: stopMsg });
+            accumulatedText += stopMsg;
             break;
           }
 
@@ -288,7 +303,9 @@ export async function POST(req: Request) {
           const toolResults: any[] = [];
           for (const tu of turnToolUses) {
             send({ type: "tool_use", name: tu.name, input: tu.input, id: tu.id });
-            emitter.emit("tool_call", { name: tu.name, args: tu.input, toolUseId: tu.id });
+            // P28a hardening — capture the call event handle so tool_result
+            // and any errors can link back via parentClientId.
+            const callHandle = emitter.emit("tool_call", { name: tu.name, args: tu.input, toolUseId: tu.id });
             const t0 = Date.now();
             let result: string;
             let success = true;
@@ -297,17 +314,19 @@ export async function POST(req: Request) {
             } catch (err: any) {
               result = `Tool error: ${err?.message || err}`;
               success = false;
-              emitter.emit("error", { source: "tool", name: tu.name, message: err?.message || String(err) });
+              emitter.emit("error",
+                { source: "tool", name: tu.name, message: err?.message || String(err) },
+                { parentClientId: callHandle.clientId },
+              );
             }
             const dt = Date.now() - t0;
             send({ type: "tool_result", id: tu.id, result, durationMs: dt });
             emitter.emit("tool_result", {
               name: tu.name, success,
-              // Truncate to avoid blowing up trace storage on huge tool outputs
               resultPreview: result.length > 500 ? result.slice(0, 500) + "…" : result,
               resultLength: result.length,
               toolUseId: tu.id,
-            }, { durationMs: dt });
+            }, { durationMs: dt, parentClientId: callHandle.clientId });
             toolCallsPersisted.push({ name: tu.name, args: tu.input, result, durationMs: dt });
             toolResults.push({ type: "tool_result", tool_use_id: tu.id, content: result });
           }

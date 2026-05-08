@@ -3,6 +3,7 @@
 
 import { clientForUser, DEFAULT_MODEL } from "./llm";
 import type { Agent } from "./types";
+import { withRetry } from "./providers";
 
 export interface RouterDecision {
   agentId: string;
@@ -26,12 +27,18 @@ The reason must be ≤ 12 words.`;
   const userPrompt = `User message:\n${message}\n\nAgents:\n${list}\n\nRespond with JSON only.`;
 
   const ant = await clientForUser(userId);
-  const result = await ant.messages.create({
-    model: DEFAULT_MODEL,
-    max_tokens: 200,
-    system,
-    messages: [{ role: "user", content: userPrompt }],
-  });
+  // P29 — retry transient failures. Router is a small focused single-shot
+  // call (≤200 output tokens), so a full layered prompt offers no caching
+  // benefit; the targeted system prompt above is correct for this surface.
+  const result = await withRetry(
+    () => ant.messages.create({
+      model: DEFAULT_MODEL,
+      max_tokens: 200,
+      system,
+      messages: [{ role: "user", content: userPrompt }],
+    }),
+    { maxAttempts: 3 },
+  );
 
   let text = "";
   for (const b of result.content) if (b.type === "text") text += b.text;
