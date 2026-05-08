@@ -57,8 +57,20 @@ function stripTags(s: string) {
 export const BUILTIN_TOOLS: Record<string, ToolDef> = {
   web_search: {
     name: "web_search",
-    description: "Search the public web. Returns up to 6 results with titles, URLs, and snippets.",
-    input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+    description: `Search the public web. Returns up to 6 results with titles, URLs, and snippets.
+
+When to use: factual lookups for events post-training-cutoff, finding specific URLs, recent news, current pricing/availability, anything where freshness matters.
+
+When NOT to use: general knowledge already in your training (basic math, well-known facts, code syntax), or when the user gave you a specific URL — just fetch it directly via browser_navigate.
+
+Tip: Build queries with high-signal terms. "Anthropic Claude pricing 2026" beats "what does the latest Claude cost." Quote exact phrases. Add site:domain.com to scope to a specific source.
+
+Pitfalls: Returns search results, not the page contents. If you need to read a specific result, call browser_navigate on the URL. Some sites (Twitter/X, SPAs) won't render usefully from search snippets — go to browser for those.`,
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "Search query. Be specific; high-signal terms beat broad ones." } },
+      required: ["query"],
+    },
     async execute(args) {
       const q = String(args?.query || "").trim();
       if (!q) return "Empty query.";
@@ -67,13 +79,23 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
   },
   generate_artifact: {
     name: "generate_artifact",
-    description: "Create a persistent artifact (webpage, document, table, image) saved to this thread. Body should be HTML body content.",
+    description: `Create a persistent artifact (webpage, document, table, image) attached to this thread. Renders as an inline embed in the chat.
+
+When to use: polished deliverables — research reports, dashboards, comparison tables, slide decks, generated mini-pages. Anything the user is likely to refer back to or share. Always prefer this over inlining a wall of HTML in the response.
+
+When NOT to use: short answers that fit in 2 paragraphs of markdown. Conversational replies. One-off code snippets (use fenced blocks).
+
+The body should be valid HTML body content (no <html>, <head>, <body> wrappers). For tables, use <table>. For pages with custom design, include inline <style>. CDN links for fonts and libraries are fine.
+
+After calling this, reference the artifact in your reply via [[ARTIFACT_<id>]] on its own line so it renders correctly. Do not paste the body content again in your reply.
+
+Pitfalls: All CSS must be inline or in <style> tags (sandboxed iframe blocks external stylesheets). External <a href> must include target="_blank" rel="noopener noreferrer".`,
     input_schema: {
       type: "object",
       properties: {
-        type: { type: "string", enum: ["webpage","document","table","image"] },
-        title: { type: "string" },
-        body: { type: "string" },
+        type: { type: "string", enum: ["webpage","document","table","image"], description: "Artifact category — webpage for HTML pages, document for long-form text, table for structured data, image for embedded media" },
+        title: { type: "string", description: "Short, descriptive title shown above the artifact" },
+        body: { type: "string", description: "HTML body content (no <html><body> wrappers)" },
       },
       required: ["type","title","body"],
     },
@@ -92,8 +114,20 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_navigate: {
     name: "browser_navigate",
-    description: "Open a URL in the user's browser session. Creates a session if none exists. Returns the final URL and page title.",
-    input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    description: `Open a URL in the user's persistent cloud Chromium session. Reuses an existing session within the same thread; auto-creates one if none exists. Sessions persist for 30 minutes of inactivity then auto-terminate.
+
+When to use: any task requiring real page rendering — JS-heavy SPAs, login-gated content, modern web apps, dashboards, anything where web_search snippets won't suffice. Also: when WebFetch / web_search return 404 or empty content.
+
+When NOT to use: simple factual lookups (web_search is faster), or when you need raw API data (use a direct API call via run_shell + curl).
+
+After navigating, follow up with browser_get_text, browser_extract, or browser_screenshot to actually read the page. Most pages benefit from a 1-2 second wait for JS to render — Hyperbrowser handles that automatically via waitUntil: domcontentloaded.
+
+Pitfalls: 30-second timeout on slow pages. Stealth mode is on by default but some bot-walls still detect headless. CAPTCHAs are auto-solved when possible.`,
+    input_schema: {
+      type: "object",
+      properties: { url: { type: "string", description: "Full URL with protocol (https://...)" } },
+      required: ["url"],
+    },
     async execute(args, ctx) {
       try {
         const r = await browser.navigate(ctx.userId, args.url);
@@ -104,10 +138,16 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_screenshot: {
     name: "browser_screenshot",
-    description: "Capture a screenshot of the current page. Saves it as an image artifact and returns the artifact id.",
+    description: `Capture a screenshot of the current browser page. Saves as an image artifact attached to this thread.
+
+When to use: visual verification of state, sharing what the user is currently seeing, capturing UI for comparison/review, or as evidence in a multi-step automation.
+
+When NOT to use: extracting text content (use browser_get_text) — screenshots are larger and the model can't read text in them as accurately as the underlying DOM.
+
+Set fullPage: true to capture the entire scrollable page (useful for long articles or dashboards). Default is just the visible viewport.`,
     input_schema: {
       type: "object",
-      properties: { fullPage: { type: "boolean", description: "Capture full scrollable page (default false)" } },
+      properties: { fullPage: { type: "boolean", description: "Capture full scrollable page (default false — viewport only)" } },
     },
     async execute(args, ctx) {
       try {
@@ -127,8 +167,20 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_click: {
     name: "browser_click",
-    description: "Click an element on the current page using a CSS selector. Use #id, .class, [data-attr=value], or button:has-text() patterns.",
-    input_schema: { type: "object", properties: { selector: { type: "string" } }, required: ["selector"] },
+    description: `Click an element on the current browser page using a CSS selector.
+
+Selector patterns: #id, .class, [data-attr="value"], button:has-text("Submit"), input[name="email"]. Modern semantic selectors usually beat brittle nth-child paths.
+
+When to use: clicking buttons, links, menu items, form controls — anything that takes a click action.
+
+When NOT to use: typing into fields (use browser_type, which auto-clicks first). Pixel-precise interactions where you need exact coordinates (use computer_click).
+
+Pitfalls: 10-second timeout if the selector doesn't match. If a click triggers navigation, the session URL will change — call browser_get_text to read the new page state. Hidden elements (display:none) won't click; check visibility first via browser_extract.`,
+    input_schema: {
+      type: "object",
+      properties: { selector: { type: "string", description: "CSS selector matching exactly one element" } },
+      required: ["selector"],
+    },
     async execute(args, ctx) {
       try {
         await browser.click(ctx.userId, args.selector);
@@ -139,10 +191,19 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_type: {
     name: "browser_type",
-    description: "Type text into a form field identified by CSS selector. Use after browser_click on the input first.",
+    description: `Type text into a form field. Auto-focuses the field via click first, then types character-by-character with realistic delay.
+
+When to use: filling out forms — search boxes, email/password fields, text areas, contenteditable divs.
+
+When NOT to use: anything that's not an input. Don't try to type into a button or div.
+
+Pitfalls: doesn't clear existing content first. If the field has a default value, send "" first via Ctrl+A then Delete, or just trust that the new text overwrites if the field auto-clears on focus.`,
     input_schema: {
       type: "object",
-      properties: { selector: { type: "string" }, text: { type: "string" } },
+      properties: {
+        selector: { type: "string", description: "CSS selector for the input" },
+        text: { type: "string", description: "Text to type (special chars OK; emoji works)" },
+      },
       required: ["selector","text"],
     },
     async execute(args, ctx) {
@@ -155,8 +216,16 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_press_key: {
     name: "browser_press_key",
-    description: "Press a keyboard key (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown').",
-    input_schema: { type: "object", properties: { key: { type: "string" } }, required: ["key"] },
+    description: `Press a keyboard key in the browser. Use after browser_type or browser_click to submit forms or trigger keyboard shortcuts.
+
+Common keys: Enter (submit), Tab (next field), Escape (close modal), ArrowDown/ArrowUp (autocomplete navigation).
+
+For modifier combinations like Cmd+A or Ctrl+C, use computer_key instead — that supports modifier syntax.`,
+    input_schema: {
+      type: "object",
+      properties: { key: { type: "string", description: "Key name like 'Enter', 'Tab', 'Escape', 'ArrowDown'" } },
+      required: ["key"],
+    },
     async execute(args, ctx) {
       try { await browser.pressKey(ctx.userId, args.key); return `Pressed ${args.key}`; }
       catch (e: any) { return `browser_press_key error: ${e.message}`; }
@@ -165,8 +234,17 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_get_text: {
     name: "browser_get_text",
-    description: "Get text content of the page or a specific element. Pass a CSS selector to scope, omit for full page.",
-    input_schema: { type: "object", properties: { selector: { type: "string" } } },
+    description: `Get text content from the current page or a specific element. Returns up to 8KB of plain text (HTML stripped).
+
+When to use: reading article content, extracting unstructured text, verifying what's currently displayed.
+
+When NOT to use: structured extraction (use browser_extract for that — it returns JSON-shaped data via AI). Reading raw HTML (use the underlying browser API directly).
+
+Pass a selector to scope to a specific element ('main', '#article-body', 'table.results'). Omit selector to get the whole body.`,
+    input_schema: {
+      type: "object",
+      properties: { selector: { type: "string", description: "Optional CSS selector to scope. Defaults to 'body'." } },
+    },
     async execute(args, ctx) {
       try { return await browser.getText(ctx.userId, args.selector); }
       catch (e: any) { return `browser_get_text error: ${e.message}`; }
@@ -175,8 +253,20 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_extract: {
     name: "browser_extract",
-    description: "AI-powered extraction. Pass a natural-language instruction like 'extract all product names and prices' and get structured data back.",
-    input_schema: { type: "object", properties: { instruction: { type: "string" } }, required: ["instruction"] },
+    description: `AI-powered structured extraction from the current page. Pass a natural-language instruction; an LLM reads the page and returns JSON-shaped data.
+
+When to use: pulling structured data — product lists with prices, table rows, contact info, article metadata, anything where you'd otherwise parse HTML by hand.
+
+When NOT to use: free-form reading (browser_get_text is cheaper). Single-element extraction where browser_get_text with a selector works.
+
+Examples: "extract all product names and prices", "get author, title, and publication date", "list every menu item with description and price".
+
+Pitfalls: relies on the LLM understanding page structure — works best on well-marked-up pages. May hallucinate if the data isn't actually on the page.`,
+    input_schema: {
+      type: "object",
+      properties: { instruction: { type: "string", description: "What to extract, in natural language" } },
+      required: ["instruction"],
+    },
     async execute(args, ctx) {
       try { return await browser.aiExtract(ctx.userId, args.instruction); }
       catch (e: any) { return `browser_extract error: ${e.message}`; }
@@ -185,12 +275,16 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_scroll: {
     name: "browser_scroll",
-    description: "Scroll the page. Direction is 'up', 'down', 'top', or 'bottom'.",
+    description: `Scroll the browser viewport. Use 'top'/'bottom' to jump, 'up'/'down' with amount for granular control.
+
+When to use: revealing lazy-loaded content (infinite scroll feeds), navigating long pages, triggering scroll-based animations or content loaders.
+
+Tip: scroll then re-read with browser_get_text or browser_extract — content above the fold may differ from below.`,
     input_schema: {
       type: "object",
       properties: {
-        direction: { type: "string", enum: ["up","down","top","bottom"] },
-        amount: { type: "number", description: "Pixels for up/down (default 600)" },
+        direction: { type: "string", enum: ["up","down","top","bottom"], description: "Direction to scroll" },
+        amount: { type: "number", description: "Pixels for up/down (default 600). Ignored for top/bottom." },
       },
       required: ["direction"],
     },
@@ -202,7 +296,11 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   browser_close: {
     name: "browser_close",
-    description: "Close the current browser session. Frees server resources. The next browser_navigate call will start a new session.",
+    description: `Explicitly close the current browser session. Frees server resources immediately. Next browser_navigate call starts a fresh session.
+
+When to use: finished a multi-step browser task and won't need it again. End of a research run. Sessions also auto-terminate after 30 minutes of inactivity, so explicit close is mostly for cost control.
+
+When NOT to use: between steps in the same task — keep the session alive to preserve cookies, navigation history, and rendering state.`,
     input_schema: { type: "object", properties: {} },
     async execute(_args, ctx) {
       try { await browser.closeSession(ctx.userId); return "Browser session closed"; }
@@ -217,7 +315,9 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   computer_screenshot: {
     name: "computer_screenshot",
-    description: "Take a screenshot of the virtual desktop (browser viewport). Returns artifact id of the captured PNG.",
+    description: `Take a screenshot of the virtual desktop (browser viewport). Same image as browser_screenshot but returns the artifact id reference for use in subsequent computer_* calls.
+
+When to use: pixel-precise computer-use workflows where you need to see the current state before issuing coordinate-based clicks/types.`,
     input_schema: { type: "object", properties: {} },
     async execute(_args, ctx) {
       try {

@@ -13,7 +13,7 @@ import {
 } from "@/lib/db";
 import { clientForUser, DEFAULT_MODEL } from "@/lib/llm";
 import { resolveAllTools, executeAnyTool, ToolCtx } from "@/lib/tools";
-import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
+import { memoriesForContext } from "@/lib/memory";
 import { routeMessage } from "@/lib/router";
 import { balance, chargeCredits, computeCost } from "@/lib/credits";
 // Note: scheduler is now driven by Vercel Cron at /api/cron, no in-process loop.
@@ -58,13 +58,36 @@ export async function POST(req: Request) {
 
   const agent = agentId ? await getAgent(agentId, user.id) : null;
 
-  // Build system prompt.
-  const memories = await memoriesForContext(user.id, agent?.id ?? null, thread.projectId);
-  const systemPrompt = (agent?.systemPrompt || "You are a helpful AI assistant.") + memoriesAsSystemBlock(memories);
-
-  // Resolve tools.
+  // Resolve tools first so we can inject toolNames into the prompt.
   const toolNames = agent?.tools?.length ? agent.tools : ["web_search", "generate_artifact"];
   const { tools, composioToolNames, builtinTools } = await resolveAllTools(user.id, toolNames);
+
+  // P23 — Build the layered system prompt via compiler.
+  // composeSystemPrompt produces a PromptSegment[] which compilePrompt turns
+  // into Anthropic system blocks with cache_control breakpoints at tier
+  // boundaries. Cache hits on subsequent calls in the same thread cut the
+  // system-prompt token cost dramatically.
+  const memories = await memoriesForContext(user.id, agent?.id ?? null, thread.projectId);
+  const { composeSystemPrompt } = await import("@/lib/prompt-segments");
+  const { compilePrompt } = await import("@/lib/prompt-compiler");
+  const segments = composeSystemPrompt({
+    agent,
+    toolNames: tools.map(t => t.name),
+    pinnedMemories: memories.filter((m: any) => (m.importance || 0) >= 8),
+    contextualMemories: memories.filter((m: any) => (m.importance || 0) < 8),
+    threadContextDocId: null, // P24 will wire this when the working-memory pattern lands
+  });
+  const compiled = compilePrompt(segments, {
+    maxTokens: 16_000, // generous cap; layered prompt should fit comfortably
+    emitter: ev => {
+      // P28a Trace Skeleton will subscribe here once it lands. For now,
+      // fingerprint + drop info just goes to the lambda log for dev visibility.
+      if (ev.type === "prompt_overbudget" || ev.dropped?.length > 0) {
+        console.warn("[prompt-compiler]", JSON.stringify(ev));
+      }
+    },
+  });
+  const systemBlocks = compiled.systemBlocks;
 
   // Build the conversation history for Anthropic.
   const allMsgs = await listMessages(threadId);
@@ -102,7 +125,7 @@ export async function POST(req: Request) {
           const stream2 = ant.messages.stream({
             model: DEFAULT_MODEL,
             max_tokens: 2048,
-            system: systemPrompt,
+            system: systemBlocks as any, // Anthropic accepts string OR array-of-text-blocks-with-cache-control
             messages,
             tools: tools as any,
           });
