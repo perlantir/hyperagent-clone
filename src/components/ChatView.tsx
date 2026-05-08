@@ -2,7 +2,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { SaveMemoryButton } from "@/components/SaveMemoryButton";
 
-interface Msg { id?: string; role: "user" | "assistant"; content: string; toolCalls?: any[]; artifactIds?: string[]; streaming?: boolean; }
+interface Msg { id?: string; role: "user" | "assistant"; content: string; toolCalls?: any[]; artifactIds?: string[]; streaming?: boolean; costCredits?: number; runId?: string; }
 
 export function ChatView({ threadId, agentId }: { threadId: string; agentId: string | null }) {
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -91,7 +91,7 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
           } else if (ev.type === "router") {
             setRouterNote(ev.reason);
           } else if (ev.type === "done") {
-            setMessages(m => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], streaming: false }; return c; });
+            setMessages(m => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], streaming: false, costCredits: ev.costCredits, runId: ev.runId }; return c; });
           } else if (ev.type === "error") {
             setMessages(m => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], content: assistantText + "\n\n[error: " + ev.message + "]", streaming: false }; return c; });
           }
@@ -176,10 +176,21 @@ function MessageView({ m }: { m: Msg }) {
         {m.content && <div className={m.streaming ? "typing-cursor" : ""} style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>}
         {m.toolCalls?.map((tc, i) => <ToolCard key={i} tc={tc} />)}
         {m.artifactIds?.map(aid => <ArtifactRef key={aid} artifactId={aid} />)}
-        {/* P25b — save-as-memory only on completed assistant messages with content */}
+        {/* P25b + P27b — save-as-memory + cost footer on completed assistant messages */}
         {m.content && !m.streaming && (
-          <div style={{ marginTop: 6 }}>
+          <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
             <SaveMemoryButton messageText={m.content} />
+            {typeof m.costCredits === "number" && (
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {m.costCredits.toLocaleString()} credits · ${(m.costCredits * 0.001).toFixed(3)}
+              </span>
+            )}
+            {m.runId && (
+              <a href={`/api/traces/${m.runId}`} target="_blank" rel="noopener noreferrer"
+                style={{ fontSize: 11, color: "var(--text-faint)", textDecoration: "none" }}>
+                trace →
+              </a>
+            )}
           </div>
         )}
       </div>

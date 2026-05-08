@@ -11,7 +11,8 @@ const NAV: NavLink[] = [
   { href: "/skills",       label: "Skills",       icon: "⚙" },
   { href: "/integrations", label: "Integrations", icon: "⊟" },
   { href: "/live",         label: "Live mode",    icon: "●" },
-  { href: "/billing",      label: "Billing",      icon: "$" },
+  { href: "/costs",        label: "Costs",        icon: "$" },
+  { href: "/billing",      label: "Billing",      icon: "+" },
   { href: "/settings",     label: "Settings",     icon: "⚙" },
 ];
 

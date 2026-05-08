@@ -41,11 +41,13 @@ let _initialized = false;
 
 async function ensureSchema() {
   if (_initialized) return;
-  // Add budget columns to trace_runs if missing. Column adds are idempotent.
+  // Add budget columns. Column adds are idempotent.
   await pool().query(`
     ALTER TABLE trace_runs ADD COLUMN IF NOT EXISTS "budgetCapCredits" BIGINT;
     ALTER TABLE trace_runs ADD COLUMN IF NOT EXISTS "spentCredits" BIGINT NOT NULL DEFAULT 0;
     ALTER TABLE trace_runs ADD COLUMN IF NOT EXISTS "reservedCredits" BIGINT NOT NULL DEFAULT 0;
+    -- P27b — per-agent budget cap override (chat route already reads agent.maxRunBudgetCredits)
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS "maxRunBudgetCredits" INTEGER;
 
     CREATE TABLE IF NOT EXISTS budget_reservations (
       id TEXT PRIMARY KEY,
