@@ -22,6 +22,7 @@
 
 import crypto from "node:crypto";
 import { pool } from "./db";
+import { redactSecretsDeep } from "./security";
 
 export type EventType =
   | "prompt_compiled"        // compiler ran; payload: { fingerprint, totalTokens, blockCount, cacheBoundaries, included, dropped }
@@ -199,14 +200,18 @@ export class TraceEmitter {
     this.flushed = true;
     const events = this.buffer;
     this.buffer = [];
-    // Build a single bulk INSERT for efficiency
+    // Build a single bulk INSERT for efficiency.
+    // P33a — redact secrets in payloads before persistence so we never store
+    // user keys (their own or others') in trace events. Defensive: if a
+    // tool result accidentally returns an API key string, this catches it.
     const cols = ['"runId"', '"ts"', '"eventType"', "payload", '"durationMs"', '"parentEventId"'];
     const placeholders: string[] = [];
     const params: any[] = [];
     let i = 1;
     for (const e of events) {
+      const redacted = redactSecretsDeep(e.payload);
       placeholders.push(`($${i}, $${i+1}, $${i+2}, $${i+3}, $${i+4}, $${i+5})`);
-      params.push(e.runId, e.ts, e.eventType, JSON.stringify(e.payload), e.durationMs || null, e.parentEventId || null);
+      params.push(e.runId, e.ts, e.eventType, JSON.stringify(redacted), e.durationMs || null, e.parentEventId || null);
       i += 6;
     }
     try {

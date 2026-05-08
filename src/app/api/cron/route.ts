@@ -8,6 +8,7 @@
 import { NextResponse } from "next/server";
 import { runDueSchedules } from "@/lib/scheduler";
 import { withIdempotency, pruneExpiredIdempotency } from "@/lib/idempotency";
+import { pruneExpiredRateLimits } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -32,13 +33,16 @@ export async function GET(req: Request) {
     { namespace: "cron", key, ttlSeconds: 600 }, // 10min — well past any retry window
     async () => {
       const scheduleResult = await runDueSchedules();
-      // Hourly sweep of expired idempotency rows. Cheap if nothing expired.
+      // Hourly sweep of expired idempotency + rate-limit rows. Cheap if nothing expired.
       let sweptIdempotency = 0;
+      let sweptRateLimits = 0;
       if (minute % 60 === 0) {
         try { sweptIdempotency = await pruneExpiredIdempotency(); }
-        catch (e) { console.error("[cron sweep]", e); }
+        catch (e) { console.error("[cron sweep idempotency]", e); }
+        try { sweptRateLimits = await pruneExpiredRateLimits(); }
+        catch (e) { console.error("[cron sweep rate_limit]", e); }
       }
-      return { ...scheduleResult, sweptIdempotency };
+      return { ...scheduleResult, sweptIdempotency, sweptRateLimits };
     },
   );
 

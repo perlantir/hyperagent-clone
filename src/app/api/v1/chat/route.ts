@@ -13,6 +13,9 @@ import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
 import { computeCost, chargeCredits, balance } from "@/lib/credits";
 import { startRun, endRun, TraceEmitter } from "@/lib/traces";
 import { withRetry } from "@/lib/providers";
+import { setBudgetCap, DEFAULT_V1_CALL_BUDGET } from "@/lib/budget";
+import { enforceRateLimit, RateLimitError } from "@/lib/rate-limit";
+import { audit, auditFromRequest } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -53,7 +56,26 @@ async function authenticate(req: Request): Promise<string | null> {
 
 export async function POST(req: Request) {
   const userId = await authenticate(req);
-  if (!userId) return NextResponse.json({ error: "Invalid or missing API key" }, { status: 401 });
+  if (!userId) {
+    await audit({ userId: null, action: "api_key.used", result: "denied", ...auditFromRequest(req) });
+    return NextResponse.json({ error: "Invalid or missing API key" }, { status: 401 });
+  }
+
+  // P33a — per-user QPS rate limit on the public API. 60 req/min is generous
+  // for any legitimate use; abuse looks like 1000+ req/min from one key.
+  try {
+    await enforceRateLimit({ userId, namespace: "v1_chat", maxRequests: 60, windowMs: 60_000 });
+  } catch (e) {
+    if (e instanceof RateLimitError) {
+      await audit({ userId, action: "rate_limit.blocked", resource: "v1_chat", result: "denied", ...auditFromRequest(req) });
+      return NextResponse.json(
+        { error: "rate limit exceeded", retryAfterMs: e.retryAfterMs },
+        { status: 429, headers: { "Retry-After": String(Math.ceil(e.retryAfterMs / 1000)) } },
+      );
+    }
+    throw e;
+  }
+  await audit({ userId, action: "api_key.used", result: "success", ...auditFromRequest(req) });
 
   const { agentId, message, threadId: existingThreadId } = await req.json().catch(() => ({}));
   if (!message) return NextResponse.json({ error: "message required" }, { status: 400 });
@@ -82,6 +104,10 @@ export async function POST(req: Request) {
     kind: "v1_api",
   });
   const emitter = new TraceEmitter(traceRunId);
+
+  // P27a — budget cap for v1 calls.
+  await setBudgetCap(traceRunId, DEFAULT_V1_CALL_BUDGET);
+  emitter.emit("budget_reserved", { runId: traceRunId, capCredits: DEFAULT_V1_CALL_BUDGET, scope: "v1_api" });
 
   let totalIn = 0, totalOut = 0, costCredits = 0;
   let content = "";

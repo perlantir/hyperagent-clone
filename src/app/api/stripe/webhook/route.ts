@@ -1,27 +1,28 @@
-// Stripe webhook (P21). Verifies signature, credits the account on success.
+// Stripe webhook. Verifies signature, credits the account on success.
 // P29 — wrapped in withIdempotency by event.id so Stripe retries don't double-credit.
+// P33a — uses shared verifyWebhookSignature helper + audit log.
 
 import { NextResponse } from "next/server";
-import crypto from "node:crypto";
 import { addCredits } from "@/lib/db";
 import { withIdempotency } from "@/lib/idempotency";
+import { verifyWebhookSignature } from "@/lib/security";
+import { audit, auditFromRequest } from "@/lib/audit";
 
 export const runtime = "nodejs";
-
-function verifyStripe(payload: string, sigHeader: string | null, secret: string): boolean {
-  if (!sigHeader) return false;
-  const parts = Object.fromEntries(sigHeader.split(",").map(p => p.split("=")));
-  const ts = parts.t; const v1 = parts.v1;
-  if (!ts || !v1) return false;
-  const signed = crypto.createHmac("sha256", secret).update(`${ts}.${payload}`).digest("hex");
-  try { return crypto.timingSafeEqual(Buffer.from(signed), Buffer.from(v1)); } catch { return false; }
-}
 
 export async function POST(req: Request) {
   const body = await req.text();
   const secret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (secret && !verifyStripe(body, req.headers.get("stripe-signature"), secret)) {
-    return NextResponse.json({ error: "bad signature" }, { status: 401 });
+  if (secret) {
+    const verify = verifyWebhookSignature("stripe", body, req.headers, secret);
+    if (!verify.valid) {
+      await audit({
+        userId: null, action: "webhook.rejected", resource: "stripe",
+        result: "denied", metadata: { reason: verify.reason },
+        ...auditFromRequest(req),
+      });
+      return NextResponse.json({ error: "bad signature" }, { status: 401 });
+    }
   }
   let event: any;
   try { event = JSON.parse(body); } catch { return NextResponse.json({ error: "bad body" }, { status: 400 }); }
@@ -49,8 +50,19 @@ async function processEventNonIdempotent(event: any): Promise<NextResponse> {
     const userId = sess?.metadata?.userId || sess?.client_reference_id;
     const credits = parseInt(sess?.metadata?.credits || "0", 10);
     if (userId && credits > 0 && sess?.id) {
-      try { await addCredits(userId, credits, `Stripe top-up (${sess.id})`, sess.id); }
-      catch (e) { console.error("[stripe webhook]", e); throw e; }  // throw so idempotency marks failed
+      try {
+        await addCredits(userId, credits, `Stripe top-up (${sess.id})`, sess.id);
+        await audit({
+          userId, action: "billing.topup", resource: `stripe_event:${event.id}`,
+          result: "success", metadata: { credits, sessionId: sess.id },
+        });
+      } catch (e) {
+        await audit({
+          userId, action: "billing.failed", resource: `stripe_event:${event.id}`,
+          result: "failure", metadata: { error: (e as any)?.message },
+        });
+        throw e;  // throw so idempotency marks failed
+      }
     }
   }
   return NextResponse.json({ ok: true });

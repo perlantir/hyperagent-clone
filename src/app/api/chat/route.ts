@@ -18,6 +18,7 @@ import { routeMessage } from "@/lib/router";
 import { balance, chargeCredits, computeCost } from "@/lib/credits";
 import { startRun, endRun, TraceEmitter } from "@/lib/traces";
 import { detectLoop, truncateMessages, classifyError } from "@/lib/providers";
+import { setBudgetCap, chargeRunBudget, isOverBudget, DEFAULT_CHAT_TURN_BUDGET } from "@/lib/budget";
 // Note: scheduler is now driven by Vercel Cron at /api/cron, no in-process loop.
 
 export const dynamic = "force-dynamic";
@@ -115,6 +116,13 @@ export async function POST(req: Request) {
     metadata: { useRouter: !!useRouter, routerNote },
   });
   const emitter = new TraceEmitter(runId);
+
+  // P27a — set the per-turn budget cap. Hard server-side limit prevents a
+  // runaway agent (recursive subagents, infinite tool loops, malicious prompts)
+  // from burning unlimited credits in one turn.
+  const budgetCap = (agent as any)?.maxRunBudgetCredits || DEFAULT_CHAT_TURN_BUDGET;
+  await setBudgetCap(runId, budgetCap);
+  emitter.emit("budget_reserved", { runId, capCredits: budgetCap, scope: "chat_turn" });
   // Re-run the compiler with the real emitter attached so trace events get
   // captured. The first compile (above) was needed to get systemBlocks before
   // the assistant message existed; this second pass overwrites traced events.
@@ -222,6 +230,23 @@ export async function POST(req: Request) {
           }, { durationMs: llmDuration });
           if (cacheRead > 0) emitter.emit("cache_hit", { tokens: cacheRead });
           else if (cacheCreate > 0) emitter.emit("cache_miss", { reason: "first_call_or_expired", createTokens: cacheCreate });
+
+          // P27a — charge this iteration's cost to the run budget. We charge
+          // optimistically per-iter so the loop break happens on the next
+          // iter check, not after the user message has fully been processed.
+          // Final charge happens at endRun via totalCostCredits.
+          const iterCost = computeCost(final.usage?.input_tokens || 0, final.usage?.output_tokens || 0);
+          await chargeRunBudget(runId, iterCost);
+          if (await isOverBudget(runId)) {
+            emitter.emit("error", {
+              source: "budget_cap",
+              message: `Hit per-turn budget cap (${budgetCap} credits). Stopping iteration.`,
+              cap: budgetCap,
+            });
+            send({ type: "delta", text: `\n\n[Stopped — hit per-turn budget cap of ${budgetCap} credits.]` });
+            accumulatedText += `\n\n[Stopped — hit per-turn budget cap of ${budgetCap} credits.]`;
+            break;
+          }
 
           // Resolve tool_use partials into JSON.
           for (const tu of turnToolUses) {

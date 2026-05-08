@@ -11,6 +11,7 @@ import { resolveAllTools } from "./tools";
 import { computeCost, chargeCredits, balance } from "./credits";
 import { startRun, endRun, TraceEmitter } from "./traces";
 import { withRetry } from "./providers";
+import { setBudgetCap, DEFAULT_SCHEDULED_RUN_BUDGET } from "./budget";
 
 export async function runDueSchedules(): Promise<{ ran: number; skipped: number; errors: number }> {
   const schedules = await listAllActiveSchedules();
@@ -48,6 +49,11 @@ async function runSchedule(scheduleId: string) {
     metadata: { scheduleId, scheduleName: s.name, scheduleRunId: run.id },
   });
   const emitter = new TraceEmitter(traceRunId);
+
+  // P27a — set per-run cap. Scheduled runs have higher cap than chat turns
+  // since users explicitly opt into recurring runs.
+  await setBudgetCap(traceRunId, DEFAULT_SCHEDULED_RUN_BUDGET);
+  emitter.emit("budget_reserved", { runId: traceRunId, capCredits: DEFAULT_SCHEDULED_RUN_BUDGET, scope: "scheduled" });
   let totalIn = 0, totalOut = 0, cost = 0;
   let status: "succeeded" | "failed" = "succeeded";
   let errMsg: string | undefined;

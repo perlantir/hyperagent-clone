@@ -8,24 +8,18 @@
 // chat.postMessage. Bot mentions and DMs both supported.
 
 import { NextResponse } from "next/server";
-import crypto from "node:crypto";
 import { pool } from "@/lib/db";
+import { verifyWebhookSignature } from "@/lib/security";
+import { audit, auditFromRequest } from "@/lib/audit";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 async function verifySlackSignature(req: Request, body: string): Promise<boolean> {
   const secret = process.env.SLACK_SIGNING_SECRET;
-  if (!secret) return true; // dev mode
-  const ts = req.headers.get("x-slack-request-timestamp");
-  const sig = req.headers.get("x-slack-signature");
-  if (!ts || !sig) return false;
-  if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
-  const base = `v0:${ts}:${body}`;
-  const mac = crypto.createHmac("sha256", secret).update(base).digest("hex");
-  const computed = `v0=${mac}`;
-  try { return crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(sig)); }
-  catch { return false; }
+  if (!secret) return true; // dev mode — no secret means no verification
+  const result = verifyWebhookSignature("slack", body, req.headers, secret);
+  return result.valid;
 }
 
 async function ensureSlackTable() {
@@ -49,6 +43,11 @@ async function ensureSlackTable() {
 export async function POST(req: Request) {
   const body = await req.text();
   if (!(await verifySlackSignature(req, body))) {
+    await audit({
+      userId: null, action: "webhook.rejected", resource: "slack",
+      result: "denied", metadata: { reason: "bad signature" },
+      ...auditFromRequest(req),
+    });
     return NextResponse.json({ error: "bad signature" }, { status: 401 });
   }
   const payload = JSON.parse(body);
