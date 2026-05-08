@@ -9,7 +9,8 @@
     "lint": "next lint",
     "test:prompt": "npx tsx src/lib/__tests__/prompt-compiler.test.ts",
     "test:providers": "npx tsx src/lib/__tests__/providers.test.ts",
-    "test:all": "npm run test:prompt && npm run test:providers"
+    "test:working-memory": "npx tsx src/lib/__tests__/working-memory.test.ts",
+    "test:all": "npm run test:prompt && npm run test:providers && npm run test:working-memory"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.3",

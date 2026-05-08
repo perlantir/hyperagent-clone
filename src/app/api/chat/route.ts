@@ -78,7 +78,10 @@ export async function POST(req: Request) {
     toolNames: tools.map(t => t.name),
     pinnedMemories: memories.filter((m: any) => (m.importance || 0) >= 8),
     contextualMemories: memories.filter((m: any) => (m.importance || 0) < 8),
-    threadContextDocId: null, // P24 will wire this when the working-memory pattern lands
+    // P24 — working memory hint references the per-thread doc. The agent
+    // updates this via the update_working_memory tool; users see Plan Tasks
+    // render in real-time via the PlanTasks component on the thread page.
+    threadContextDocId: threadId,
   });
   const compiled = compilePrompt(segments, {
     maxTokens: 16_000, // generous cap; layered prompt should fit comfortably

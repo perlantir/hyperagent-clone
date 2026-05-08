@@ -604,6 +604,121 @@ Pitfalls: real people generation is restricted. Branded products may be rejected
     },
   },
 
+  // ============ WORKING MEMORY (P24) ============
+
+  update_working_memory: {
+    name: "update_working_memory",
+    description: `Update your Thread Context Doc — the persistent working memory for this thread. Use it to record plans, findings, decisions, and to track multi-step progress with checkbox tasks.
+
+When to use:
+- BEFORE multi-step work (3+ tool calls or sub-tasks): write a plan in Plan Tasks as checkboxes ("- [ ] task description")
+- DURING execution: tick off completed tasks with operation "check_task"
+- AFTER discovering important facts: append to Findings (numbers, URLs, entities, dates)
+- AFTER making a tradeoff: append to Decisions ("Chose X over Y because Z")
+- AFTER user states a constraint: append to Notes ("Budget: $50K", "Must ship by Friday")
+
+When NOT to use:
+- Simple one-step Q&A — overhead isn't worth it
+- Information that fits in 2 paragraphs of the response
+- Sensitive secrets (the doc is visible to the user but logged in trace events)
+
+Operations:
+- append: add content to end of section (most common)
+- prepend: add content to beginning of section
+- replace: overwrite section entirely (rare; use for plan rewrites)
+- check_task: tick off a checkbox ("- [ ] X" → "- [x] X"). Pass the exact task text as content.
+
+Default sections: "Plan Overview", "Plan Tasks", "Findings", "Decisions", "Notes". You can use any other section name and it'll be created.
+
+Tip: Plan Tasks should be checkbox lists. The UI renders them as a live progress bar — the user sees you completing work in real-time.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        section: { type: "string", description: "Section name. Common: Plan Overview, Plan Tasks, Findings, Decisions, Notes. Custom names auto-create the section." },
+        operation: { type: "string", enum: ["append", "prepend", "replace", "check_task"], description: "How to combine with existing content" },
+        content: { type: "string", description: "Text to add or, for check_task, the exact task text to tick off" },
+      },
+      required: ["section", "operation", "content"],
+    },
+    async execute(args, ctx) {
+      try {
+        const { updateSection } = await import("./working-memory");
+        const r = await updateSection(ctx.threadId, args.section, args.operation, args.content);
+        if (!r.ok) return `update_working_memory error: ${r.reason}`;
+        return `Updated section "${args.section}" (${args.operation}). New length: ${r.section?.content.length} chars.`;
+      } catch (e: any) {
+        return `update_working_memory error: ${e.message}`;
+      }
+    },
+  },
+
+  // ============ SUBAGENT DISPATCH (P24) ============
+
+  dispatch_agent: {
+    name: "dispatch_agent",
+    description: `Spawn a focused subagent in parallel to handle a contained sub-task. The subagent runs in its own isolated context, returns a structured result (summary + artifacts + cost + trace_id), and its budget is reserved from your remaining run budget.
+
+When to use:
+- Multi-faceted research where each facet is independent (research A in one subagent, B in another, run in parallel)
+- Code review where the reviewer needs different context than the implementer
+- Long single-step work that would otherwise blow the parent's context window
+- Bounded explorations: "investigate X with these specific tools, return findings"
+
+When NOT to use:
+- Sequential dependent work — just continue in this thread, no need for a subagent
+- Trivial tasks — overhead of dispatch (budget reservation, prompt compile, separate trace) isn't worth it for a one-shot tool call
+- Anything that needs the same conversation history — subagents don't see your thread
+
+Hard guardrails enforced by the platform:
+- max_depth: 3 (parent depth 0; one level of children OK; grandchildren OK; great-grandchildren rejected)
+- max_parallel per parent: 5 concurrent dispatches
+- budget_remaining: subagent reserves credits from your pool; if denied, dispatch fails fast
+- allowed_tools: subset of the parent's tools (cannot escalate)
+- deadline_ms: default 120000 (2 min), max 300000 (5 min)
+- Subagent gets the layered system prompt + its own working memory, but does NOT see this thread
+
+Returned structure:
+{
+  childRunId: "run_xxx",
+  status: "succeeded" | "failed" | "timeout" | "cancelled",
+  summary: "...",       // what the subagent ultimately concluded
+  artifacts: [...],     // any artifacts the subagent created
+  costCredits: number,  // committed cost
+  durationMs: number,
+  traceUrl: "/api/traces/run_xxx"
+}
+
+Tip: write the goal as a self-contained brief. Include all context the subagent needs — it can't ask you clarifying questions mid-run.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        goal: { type: "string", description: "Self-contained brief: what to accomplish, what context, what output shape. Write as if briefing a stranger." },
+        allowed_tools: { type: "array", items: { type: "string" }, description: "Subset of parent's tools the subagent can use. Default: all parent tools except dispatch_agent itself." },
+        deadline_ms: { type: "number", description: "Max wall-clock duration in ms (default 120000, max 300000)" },
+        budget_credits: { type: "number", description: "Max credits the subagent may spend (default 2000). Reserved from parent's remaining budget." },
+      },
+      required: ["goal"],
+    },
+    async execute(args, ctx) {
+      try {
+        const { dispatchSubagent } = await import("./subagent");
+        const result = await dispatchSubagent({
+          parentRunId: (ctx as any).runId || null,
+          parentDepth: (ctx as any).depth || 0,
+          userId: ctx.userId,
+          threadId: ctx.threadId,
+          goal: args.goal,
+          allowedTools: args.allowed_tools,
+          deadlineMs: args.deadline_ms,
+          budgetCredits: args.budget_credits,
+        });
+        return JSON.stringify(result);
+      } catch (e: any) {
+        return `dispatch_agent error: ${e.message}`;
+      }
+    },
+  },
+
   // ============ SANDBOXED CODE EXECUTION (e2b) ============
 
   code_interpreter: {
@@ -756,4 +871,6 @@ export const DEFAULT_AGENT_TOOLS = [
   "generate_video",
   "code_interpreter",
   "run_shell",
+  "update_working_memory",
+  "dispatch_agent",
 ];
