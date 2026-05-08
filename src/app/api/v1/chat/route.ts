@@ -35,11 +35,18 @@ async function authenticate(req: Request): Promise<string | null> {
   const auth = req.headers.get("authorization") || "";
   const m = auth.match(/^Bearer\s+(hak_[A-Za-z0-9_-]+)$/);
   if (!m) return null;
-  await ensureKeyTable();
-  const r = await pool().query(`SELECT "userId", id FROM api_keys WHERE "keyHash"=$1`, [hashKey(m[1])]);
-  if (!r.rows[0]) return null;
-  await pool().query(`UPDATE api_keys SET "lastUsedAt"=$1 WHERE id=$2`, [Date.now(), r.rows[0].id]);
-  return r.rows[0].userId;
+  // Treat DB unavailability as auth failure rather than 500ing — keeps /api/v1/chat
+  // safe to probe in environments where DATABASE_URL hasn't been wired yet.
+  try {
+    await ensureKeyTable();
+    const r = await pool().query(`SELECT "userId", id FROM api_keys WHERE "keyHash"=$1`, [hashKey(m[1])]);
+    if (!r.rows[0]) return null;
+    await pool().query(`UPDATE api_keys SET "lastUsedAt"=$1 WHERE id=$2`, [Date.now(), r.rows[0].id]);
+    return r.rows[0].userId;
+  } catch (e) {
+    console.error("[v1/chat authenticate]", e);
+    return null;
+  }
 }
 
 export async function POST(req: Request) {

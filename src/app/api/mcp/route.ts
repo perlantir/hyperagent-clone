@@ -13,11 +13,16 @@ async function authenticate(req: Request) {
   const auth = req.headers.get("authorization") || "";
   const m = auth.match(/^Bearer\s+(hak_[A-Za-z0-9_-]+)$/);
   if (!m) return null;
-  const crypto = await import("node:crypto");
-  const { pool } = await import("@/lib/db");
-  const hash = crypto.createHash("sha256").update(m[1]).digest("hex");
-  const r = await pool().query(`SELECT "userId" FROM api_keys WHERE "keyHash"=$1`, [hash]);
-  return r.rows[0]?.userId || null;
+  try {
+    const crypto = await import("node:crypto");
+    const { pool } = await import("@/lib/db");
+    const hash = crypto.createHash("sha256").update(m[1]).digest("hex");
+    const r = await pool().query(`SELECT "userId" FROM api_keys WHERE "keyHash"=$1`, [hash]);
+    return r.rows[0]?.userId || null;
+  } catch (e) {
+    console.error("[mcp authenticate]", e);
+    return null;
+  }
 }
 
 export async function POST(req: Request) {
