@@ -12,6 +12,7 @@ import { resolveAllTools } from "@/lib/tools";
 import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
 import { computeCost, chargeCredits, balance } from "@/lib/credits";
 import { startRun, endRun, TraceEmitter } from "@/lib/traces";
+import { withRetry } from "@/lib/providers";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -90,13 +91,25 @@ export async function POST(req: Request) {
   try {
     const ant = await clientForUser(userId);
     const llmStart = Date.now();
-    const result = await ant.messages.create({
-      model: DEFAULT_MODEL,
-      max_tokens: 2048,
-      system,
-      messages: [{ role: "user", content: message }],
-      tools: tools as any,
-    });
+    // P29 — retry transient failures.
+    const result = await withRetry(
+      () => ant.messages.create({
+        model: DEFAULT_MODEL,
+        max_tokens: 2048,
+        system,
+        messages: [{ role: "user", content: message }],
+        tools: tools as any,
+      }),
+      {
+        maxAttempts: 3,
+        onRetry: (attempt, classified, delayMs) => {
+          emitter.emit("retry", {
+            attempt, errorClass: classified.class, reason: classified.reason,
+            status: classified.status, delayMs,
+          });
+        },
+      },
+    );
     const llmDuration = Date.now() - llmStart;
     totalIn = result.usage?.input_tokens ?? 0;
     totalOut = result.usage?.output_tokens ?? 0;

@@ -17,6 +17,7 @@ import { memoriesForContext } from "@/lib/memory";
 import { routeMessage } from "@/lib/router";
 import { balance, chargeCredits, computeCost } from "@/lib/credits";
 import { startRun, endRun, TraceEmitter } from "@/lib/traces";
+import { detectLoop, truncateMessages, classifyError } from "@/lib/providers";
 // Note: scheduler is now driven by Vercel Cron at /api/cron, no in-process loop.
 
 export const dynamic = "force-dynamic";
@@ -155,7 +156,25 @@ export async function POST(req: Request) {
         // Iterative tool-calling loop. Each iteration may produce text + zero or more tool_use blocks.
         let messages = anthropicMessages.slice();
         const ant = await clientForUser(user.id);
+
+        // P29 — track per-iteration signature for loop detection.
+        const iterHistory: Array<{ text: string; toolSig: string }> = [];
+
         for (let iter = 0; iter < 6; iter++) {
+          // P29 — context-overflow truncation. If our messages array would
+          // exceed the model's window after the system prompt, truncate the
+          // middle (oldest tool_results, oldest assistant turns) before sending.
+          // Conservative cap: 150k tokens leaves headroom for system + response.
+          const truncated = truncateMessages(messages, 150_000);
+          if (truncated.dropped > 0) {
+            emitter.emit("section_drop", {
+              kind: "messages_truncated",
+              droppedCount: truncated.dropped,
+              reason: "context overflow protection",
+            });
+            messages = truncated.messages;
+          }
+
           const llmStart = Date.now();
           const stream2 = ant.messages.stream({
             model: DEFAULT_MODEL,
@@ -208,6 +227,22 @@ export async function POST(req: Request) {
           for (const tu of turnToolUses) {
             try { tu.input = (tu as any)._partial ? JSON.parse((tu as any)._partial) : {}; }
             catch { tu.input = {}; }
+          }
+
+          // P29 — record signature for loop detection.
+          const toolSig = turnToolUses
+            .map(tu => `${tu.name}:${JSON.stringify(tu.input)}`)
+            .sort().join("|");
+          iterHistory.push({ text: turnText, toolSig });
+          if (detectLoop(iterHistory, 3)) {
+            emitter.emit("error", {
+              source: "loop_detector",
+              message: "Same tool calls 3+ iterations with no new text. Breaking loop.",
+              lastToolSig: toolSig,
+            });
+            send({ type: "delta", text: "\n\n[Stopping — agent is looping on the same tool calls. Try rephrasing or restarting.]" });
+            accumulatedText += "\n\n[Stopping — agent is looping on the same tool calls. Try rephrasing or restarting.]";
+            break;
           }
 
           // If no tool calls this turn, we're done.

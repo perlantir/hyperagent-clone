@@ -10,6 +10,7 @@ import { clientForUser, DEFAULT_MODEL } from "./llm";
 import { resolveAllTools } from "./tools";
 import { computeCost, chargeCredits, balance } from "./credits";
 import { startRun, endRun, TraceEmitter } from "./traces";
+import { withRetry } from "./providers";
 
 export async function runDueSchedules(): Promise<{ ran: number; skipped: number; errors: number }> {
   const schedules = await listAllActiveSchedules();
@@ -62,13 +63,27 @@ async function runSchedule(scheduleId: string) {
     const { tools } = await resolveAllTools(s.userId, agent.tools);
     const ant = await clientForUser(s.userId);
     const llmStart = Date.now();
-    const result = await ant.messages.create({
-      model: DEFAULT_MODEL,
-      max_tokens: 1024,
-      system: agent.systemPrompt,
-      messages: [{ role: "user", content: s.prompt }],
-      tools: tools as any,
-    });
+    // P29 — retry transient failures (Anthropic 529, network blips). Auth
+    // errors, malformed requests, and context-overflow fail through
+    // immediately without retry.
+    const result = await withRetry(
+      () => ant.messages.create({
+        model: DEFAULT_MODEL,
+        max_tokens: 1024,
+        system: agent.systemPrompt,
+        messages: [{ role: "user", content: s.prompt }],
+        tools: tools as any,
+      }),
+      {
+        maxAttempts: 3,
+        onRetry: (attempt, classified, delayMs) => {
+          emitter.emit("retry", {
+            attempt, errorClass: classified.class, reason: classified.reason,
+            status: classified.status, delayMs,
+          });
+        },
+      },
+    );
     const llmDuration = Date.now() - llmStart;
 
     totalIn = result.usage?.input_tokens ?? 0;
