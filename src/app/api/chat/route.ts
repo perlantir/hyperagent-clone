@@ -16,20 +16,16 @@ import { resolveAllTools, executeAnyTool, ToolCtx } from "@/lib/tools";
 import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
 import { routeMessage } from "@/lib/router";
 import { balance, chargeCredits, computeCost } from "@/lib/credits";
-import { startScheduler } from "@/lib/scheduler";
+// Note: scheduler is now driven by Vercel Cron at /api/cron, no in-process loop.
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
-// Kick off the in-process scheduler the first time anyone hits chat.
-let _sched = false;
-function ensureScheduler() { if (!_sched) { _sched = true; try { startScheduler(); } catch {} } }
+// Scheduler is now Vercel Cron at /api/cron — no in-process boot needed.
 
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  ensureScheduler();
-
   const { threadId, content, useRouter } = await req.json().catch(() => ({}));
   if (!threadId || !content) return NextResponse.json({ error: "threadId and content required" }, { status: 400 });
 
