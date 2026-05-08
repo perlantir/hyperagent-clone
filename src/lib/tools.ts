@@ -324,18 +324,22 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 
   generate_image: {
     name: "generate_image",
-    description: "Generate a new image from a text prompt using Gemini Nano Banana. Saves as image artifact.",
+    description: "Generate an image from a text prompt. Provider (gemini/openai/grok) defaults to user preference but can be overridden. Saves as image artifact.",
     input_schema: {
       type: "object",
       properties: {
         prompt: { type: "string", description: "What to draw. Be specific about subject, style, composition." },
-        aspectRatio: { type: "string", enum: ["1:1","16:9","9:16","4:3","3:4"], description: "Image aspect ratio" },
+        aspectRatio: { type: "string", enum: ["1:1","16:9","9:16","4:3","3:4"] },
+        provider: { type: "string", enum: ["gemini","openai","grok"], description: "Override the user's default image provider" },
       },
       required: ["prompt"],
     },
     async execute(args, ctx) {
       try {
-        const base64 = await media.generateImage(args.prompt, { aspectRatio: args.aspectRatio });
+        const { getPrefs } = await import("./preferences");
+        const prefs = await getPrefs(ctx.userId);
+        const provider = (args.provider || prefs.imageProvider || "gemini") as media.ImageProvider;
+        const base64 = await media.generateImage(args.prompt, { provider, aspectRatio: args.aspectRatio });
         if (!base64) return "Image generation returned empty.";
         const { createArtifact } = await import("./db");
         const a = await createArtifact({
@@ -344,46 +348,60 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
           body: `<img src="data:image/png;base64,${base64}" style="max-width:100%;display:block">`,
         });
         ctx.artifactsCreated.push({ id: a.id, type: a.type, title: a.title });
-        return `Image generated: artifact id=${a.id}`;
+        return `Image generated via ${provider}: artifact id=${a.id}`;
       } catch (e: any) { return `generate_image error: ${e.message}`; }
     },
   },
 
   generate_speech: {
     name: "generate_speech",
-    description: "Convert text to speech audio (Gemini TTS). Saves as a document artifact with embedded audio player.",
+    description: "Convert text to speech. Provider (gemini/openai) defaults to user preference. Saves as audio artifact.",
     input_schema: {
       type: "object",
       properties: {
         text: { type: "string" },
-        voice: { type: "string", enum: ["Kore","Charon","Puck","Zephyr","Leda","Aoede"] },
+        voice: { type: "string" },
+        provider: { type: "string", enum: ["gemini","openai"] },
       },
       required: ["text"],
     },
     async execute(args, ctx) {
       try {
-        const base64 = await media.generateSpeech(args.text, args.voice || "Kore");
-        if (!base64) return "TTS returned empty.";
+        const { getPrefs } = await import("./preferences");
+        const prefs = await getPrefs(ctx.userId);
+        const provider = (args.provider || prefs.speechProvider || "gemini") as media.SpeechProvider;
+        const result = await media.generateSpeech(args.text, { provider, voice: args.voice });
+        if (!result.base64) return "TTS returned empty.";
         const { createArtifact } = await import("./db");
         const a = await createArtifact({
           threadId: ctx.threadId, messageId: ctx.messageId, type: "document",
           title: `Audio: ${args.text.slice(0, 50)}…`,
-          body: `<audio controls style="width:100%"><source src="data:audio/wav;base64,${base64}" type="audio/wav"></audio>`,
+          body: `<audio controls style="width:100%"><source src="data:${result.mimeType};base64,${result.base64}" type="${result.mimeType}"></audio>`,
         });
         ctx.artifactsCreated.push({ id: a.id, type: a.type, title: a.title });
-        return `Audio generated: artifact id=${a.id}`;
+        return `Audio generated via ${provider}: artifact id=${a.id}`;
       } catch (e: any) { return `generate_speech error: ${e.message}`; }
     },
   },
 
   generate_video: {
     name: "generate_video",
-    description: "Generate a short video from a text prompt using Veo. Returns an operation name to poll. Long-running (1-3 min).",
-    input_schema: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
-    async execute(args, _ctx) {
+    description: "Generate a short video. Provider (gemini Veo / openai Sora). Async — returns operation id.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string" },
+        provider: { type: "string", enum: ["gemini","openai"] },
+      },
+      required: ["prompt"],
+    },
+    async execute(args, ctx) {
       try {
-        const r = await media.generateVideo(args.prompt);
-        return `Video generation started. Operation: ${r.operationName}. Poll with check_video_status.`;
+        const { getPrefs } = await import("./preferences");
+        const prefs = await getPrefs(ctx.userId);
+        const provider = (args.provider || prefs.videoProvider || "gemini") as media.VideoProvider;
+        const r = await media.generateVideo(args.prompt, { provider });
+        return `Video generation started via ${r.provider}. Operation: ${r.operationName}.`;
       } catch (e: any) { return `generate_video error: ${e.message}`; }
     },
   },
