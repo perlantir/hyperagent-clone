@@ -21,8 +21,15 @@ export default function BillingPage() {
   useEffect(() => { reload(); }, []);
 
   async function topup(packageId: string) {
-    await fetch("/api/credits/topup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packageId }) });
-    reload();
+    const r = await fetch("/api/credits/topup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ packageId }) });
+    const j = await r.json();
+    if (j.url) {
+      // Real Stripe Checkout — redirect
+      window.location.href = j.url;
+    } else {
+      // Dev fallback — credits added immediately
+      reload();
+    }
   }
 
   return (
