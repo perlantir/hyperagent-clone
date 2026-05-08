@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
+import { SaveMemoryButton } from "@/components/SaveMemoryButton";
 
 interface Msg { id?: string; role: "user" | "assistant"; content: string; toolCalls?: any[]; artifactIds?: string[]; streaming?: boolean; }
 
@@ -175,6 +176,12 @@ function MessageView({ m }: { m: Msg }) {
         {m.content && <div className={m.streaming ? "typing-cursor" : ""} style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>}
         {m.toolCalls?.map((tc, i) => <ToolCard key={i} tc={tc} />)}
         {m.artifactIds?.map(aid => <ArtifactRef key={aid} artifactId={aid} />)}
+        {/* P25b — save-as-memory only on completed assistant messages with content */}
+        {m.content && !m.streaming && (
+          <div style={{ marginTop: 6 }}>
+            <SaveMemoryButton messageText={m.content} />
+          </div>
+        )}
       </div>
     </div>
   );

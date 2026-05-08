@@ -10,6 +10,8 @@ import { runDueSchedules } from "@/lib/scheduler";
 import { withIdempotency, pruneExpiredIdempotency } from "@/lib/idempotency";
 import { pruneExpiredRateLimits } from "@/lib/rate-limit";
 import { replayDlq } from "@/lib/audit";
+import { pool } from "@/lib/db";
+import { recomputeDecayScores } from "@/lib/memory-compaction";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -39,20 +41,30 @@ export async function GET(req: Request) {
       let sweptIdempotency = 0;
       let sweptRateLimits = 0;
       let dlqReplayed = 0, dlqFailed = 0;
+      let decayUsersUpdated = 0;
       if (minute % 60 === 0) {
         try { sweptIdempotency = await pruneExpiredIdempotency(); }
         catch (e) { console.error("[cron sweep idempotency]", e); }
         try { sweptRateLimits = await pruneExpiredRateLimits(); }
         catch (e) { console.error("[cron sweep rate_limit]", e); }
-        // P33a — replay any audit events that had to fall back to the DLQ.
-        // If primary INSERT was failing transiently, replay should succeed
-        // now and audit_log gets backfilled.
         try {
           const r = await replayDlq(100);
           dlqReplayed = r.replayed; dlqFailed = r.failed;
         } catch (e) { console.error("[cron replay dlq]", e); }
       }
-      return { ...scheduleResult, sweptIdempotency, sweptRateLimits, dlqReplayed, dlqFailed };
+      // P25b — weekly decay recompute. Runs at minute 0 of hour 0 of day 0
+      // (= early Monday) UTC. Cheap UPDATE per user.
+      const isWeeklyTick = minute % (60 * 24 * 7) === 0;
+      if (isWeeklyTick) {
+        try {
+          const users = await pool().query(`SELECT DISTINCT id FROM users`);
+          for (const u of users.rows) {
+            try { await recomputeDecayScores(u.id); decayUsersUpdated++; }
+            catch (e) { console.error(`[cron decay user ${u.id}]`, e); }
+          }
+        } catch (e) { console.error("[cron decay sweep]", e); }
+      }
+      return { ...scheduleResult, sweptIdempotency, sweptRateLimits, dlqReplayed, dlqFailed, decayUsersUpdated };
     },
   );
 
