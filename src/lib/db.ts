@@ -381,12 +381,15 @@ export async function getAgent(id: string, userId: string): Promise<Agent | null
   if (!row) return null;
   return { ...row, tools: JSON.parse(row.tools), connectorIds: JSON.parse(row.connectorIds || "[]") };
 }
-export async function createAgent(a: Omit<Agent,"id"|"createdAt">): Promise<Agent> {
+export async function createAgent(a: Omit<Agent,"id"|"createdAt"> & { projectId?: string | null; connectorIds?: string[]; routerHint?: string }): Promise<Agent> {
   const id = uid("a"); const createdAt = Date.now();
+  const projectId = a.projectId ?? null;
+  const connectorIds = a.connectorIds ?? [];
+  const routerHint = a.routerHint ?? "";
   await q(`INSERT INTO agents (id,"userId","projectId",name,icon,color,description,"systemPrompt",tools,"connectorIds","routerHint","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-    [id, a.userId, a.projectId, a.name, a.icon, a.color, a.description, a.systemPrompt,
-     JSON.stringify(a.tools), JSON.stringify(a.connectorIds), a.routerHint, createdAt]);
-  return { ...a, id, createdAt };
+    [id, a.userId, projectId, a.name, a.icon, a.color, a.description, a.systemPrompt,
+     JSON.stringify(a.tools), JSON.stringify(connectorIds), routerHint, createdAt]);
+  return { ...a, id, projectId, connectorIds, routerHint, createdAt } as Agent;
 }
 export async function updateAgent(id: string, userId: string, fields: Partial<Omit<Agent,"id"|"userId"|"createdAt">>) {
   const cur = await getAgent(id, userId); if (!cur) return;
