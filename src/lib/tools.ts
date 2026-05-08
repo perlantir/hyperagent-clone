@@ -604,6 +604,119 @@ Pitfalls: real people generation is restricted. Branded products may be rejected
     },
   },
 
+  // ============ KNOWLEDGE BASE (P25) ============
+
+  save_memory: {
+    name: "save_memory",
+    description: `Save a fact, preference, or context as a persistent memory the user's agents can recall in future conversations. PROPOSAL-BASED: low-risk categories auto-accept; everything else queues for user approval.
+
+When to use:
+- The user states a durable fact ("I prefer TypeScript", "We use Postgres on Neon")
+- The user reveals a constraint that should persist ("budget is $50K", "must comply with HIPAA")
+- The user shares a tool/workflow ("we deploy via Vercel", "I plan in Notion")
+- A recurring person/team is named ("Sarah is our designer", "the eng team is in Berlin")
+
+When NOT to use:
+- Ephemeral context for THIS thread (use update_working_memory instead)
+- Things the user explicitly asked you to forget
+- Secrets, credentials, API keys (auto-rejected by PII filter; don't even try)
+
+Categories (determines auto-accept vs propose):
+- AUTO-ACCEPT (low-risk operational):
+  • user_fact: stable facts about the user (job title, company, location)
+  • preference: their preferences (tools, style, format, communication)
+  • tools_and_workflows: how they work (deploy via X, plan in Y)
+- PROPOSE (queues for review):
+  • project_context, domain_knowledge, people, organization, active_work
+
+PII detection runs automatically. Emails, phones, SSNs, credit cards, IPs in content force the memory to be queued for review regardless of category.
+
+Returns memory id + state ("accepted" or "proposed"). On dedup, returns the existing memory's id with no new write.
+
+Tip: write each memory as a single declarative sentence. "User prefers TypeScript" beats "User says TS is better than JS most of the time".`,
+    input_schema: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "The fact or preference to remember. One declarative sentence." },
+        category: {
+          type: "string",
+          enum: ["user_fact", "preference", "project_context", "domain_knowledge", "people", "active_work", "tools_and_workflows", "organization"],
+          description: "Best category. Determines auto-accept vs propose.",
+        },
+        importance: { type: "number", description: "0-10. ≥8 auto-pins to T1 (always-present)." },
+        whenToUse: { type: "string", description: "Brief hint about when this memory is relevant" },
+        tags: { type: "array", items: { type: "string" } },
+        pinned: { type: "boolean", description: "Force pin to T1 regardless of importance" },
+      },
+      required: ["content", "category"],
+    },
+    async execute(args, ctx) {
+      try {
+        const { proposeMemory } = await import("./memory");
+        const result = await proposeMemory({
+          userId: ctx.userId,
+          content: args.content,
+          category: args.category,
+          importance: args.importance,
+          whenToUse: args.whenToUse,
+          tags: args.tags,
+          pinned: args.pinned,
+          sourceRunId: (ctx as any).runId,
+        });
+        if (result.duplicateOfId) {
+          return `Memory exists already (deduplicated against ${result.duplicateOfId}). lastUsedAt updated.`;
+        }
+        if (result.state === "accepted") {
+          return `Memory saved (id=${result.memoryId}, accepted: ${result.reason})`;
+        }
+        const piiNote = result.piiDetected ? ` PII detected: ${result.piiTypes?.join(", ")}.` : "";
+        return `Memory queued for user approval (id=${result.memoryId}, ${result.reason}).${piiNote} User can accept/reject via /api/memories/${result.memoryId}/accept.`;
+      } catch (e: any) {
+        return `save_memory error: ${e.message}`;
+      }
+    },
+  },
+
+  search_knowledge: {
+    name: "search_knowledge",
+    description: `Search the user's persistent memories for relevant context. Use when prior conversations established a fact you need but it isn't in your current context window.
+
+When to use:
+- User references "last time" / "the project we discussed" / "my preferred X"
+- A topic comes up that the user has likely told you about before
+- You need user-specific context that isn't in the system prompt's pinned memories
+
+When NOT to use:
+- Ephemeral facts (use update_working_memory and read your Thread Context Doc)
+- General knowledge (use web_search)
+- Things you can derive from the current message
+
+Returns top-K matching memories ranked by semantic similarity (cosine via OpenAI text-embedding-3-small). Memories are scoped to the user's accessible set (user-level + memories tagged to current agent + memories tagged to current project).
+
+Pitfalls: similarity below 0.4 is filtered out. Empty results means either (a) nothing relevant exists, or (b) the user hasn't accepted any memories yet — they can check /api/memories?state=proposed.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language search query — describe what you're looking for" },
+        limit: { type: "number", description: "Max results (default 10, hard max 20)" },
+      },
+      required: ["query"],
+    },
+    async execute(args, ctx) {
+      try {
+        const { searchKnowledge } = await import("./memory");
+        const results = await searchKnowledge(ctx.userId, args.query, {
+          limit: Math.min(args.limit ?? 10, 20),
+        });
+        if (!results.length) return "No matching memories found. (User may not have any saved memories yet, or none match this query above 0.4 similarity.)";
+        return `Found ${results.length} memories:\n` +
+          results.map((r, i) => `${i+1}. [sim ${r.similarity.toFixed(2)}, importance ${r.importance}] ${r.content}`).join("\n");
+      } catch (e: any) {
+        return `search_knowledge error: ${e.message}`;
+      }
+    },
+  },
+
   // ============ WORKING MEMORY (P24) ============
 
   update_working_memory: {
@@ -873,4 +986,6 @@ export const DEFAULT_AGENT_TOOLS = [
   "run_shell",
   "update_working_memory",
   "dispatch_agent",
+  "save_memory",
+  "search_knowledge",
 ];

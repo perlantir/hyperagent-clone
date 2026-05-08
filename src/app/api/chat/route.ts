@@ -13,7 +13,7 @@ import {
 } from "@/lib/db";
 import { clientForUser, DEFAULT_MODEL } from "@/lib/llm";
 import { resolveAllTools, executeAnyTool, ToolCtx } from "@/lib/tools";
-import { memoriesForContext } from "@/lib/memory";
+import { retrieveMemoriesForChat } from "@/lib/memory";
 import { routeMessage } from "@/lib/router";
 import { balance, chargeCredits, computeCost } from "@/lib/credits";
 import { startRun, endRun, TraceEmitter } from "@/lib/traces";
@@ -70,17 +70,18 @@ export async function POST(req: Request) {
   // into Anthropic system blocks with cache_control breakpoints at tier
   // boundaries. Cache hits on subsequent calls in the same thread cut the
   // system-prompt token cost dramatically.
-  const memories = await memoriesForContext(user.id, agent?.id ?? null, thread.projectId);
+  // P25 — three-tier memory retrieval: T1 (pinned + importance≥8 always-present)
+  // and T2 (top-K cosine match against the user's current message). T3 is
+  // the search_knowledge tool which the agent calls explicitly when needed.
+  const { pinned: pinnedMemories, contextual: contextualMemories } =
+    await retrieveMemoriesForChat(user.id, agent?.id ?? null, thread.projectId, content);
   const { composeSystemPrompt } = await import("@/lib/prompt-segments");
   const { compilePrompt } = await import("@/lib/prompt-compiler");
   const segments = composeSystemPrompt({
     agent,
     toolNames: tools.map(t => t.name),
-    pinnedMemories: memories.filter((m: any) => (m.importance || 0) >= 8),
-    contextualMemories: memories.filter((m: any) => (m.importance || 0) < 8),
-    // P24 — working memory hint references the per-thread doc. The agent
-    // updates this via the update_working_memory tool; users see Plan Tasks
-    // render in real-time via the PlanTasks component on the thread page.
+    pinnedMemories,
+    contextualMemories,
     threadContextDocId: threadId,
   });
   const compiled = compilePrompt(segments, {
@@ -148,9 +149,9 @@ export async function POST(req: Request) {
     emitter.emit("section_drop", { kind: d.kind, reason: d.reason });
   }
   emitter.emit("memory_read", {
-    count: memories.length,
-    pinnedCount: memories.filter((m: any) => (m.importance || 0) >= 8).length,
-    contextualCount: memories.filter((m: any) => (m.importance || 0) < 8).length,
+    count: pinnedMemories.length + contextualMemories.length,
+    pinnedCount: pinnedMemories.length,
+    contextualCount: contextualMemories.length,
   });
 
   const encoder = new TextEncoder();

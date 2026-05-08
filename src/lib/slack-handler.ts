@@ -3,7 +3,7 @@
 import { pool, createThread, createMessage, getAgent, listAgents, updateMessage } from "./db";
 import { clientForUser, DEFAULT_MODEL } from "./llm";
 import { resolveAllTools, executeAnyTool, ToolCtx } from "./tools";
-import { memoriesForContext } from "./memory";
+import { retrieveMemoriesForChat } from "./memory";
 import { computeCost, chargeCredits, balance } from "./credits";
 import { composeSystemPrompt } from "./prompt-segments";
 import { compilePrompt } from "./prompt-compiler";
@@ -32,7 +32,9 @@ export async function runAgentForSlack(userId: string, agentId: string | null, t
   const assistantMsg = await createMessage({ threadId, role: "assistant", content: "" });
 
   const agent = agentId ? await getAgent(agentId, userId) : null;
-  const memories = await memoriesForContext(userId, agentId, null);
+  // P25 — T1 + T2 retrieval; the Slack message text is the cosine query
+  const { pinned: pinnedMemories, contextual: contextualMemories } =
+    await retrieveMemoriesForChat(userId, agentId, null, userText);
   const toolNames = agent?.tools || ["web_search", "generate_artifact"];
   const { tools } = await resolveAllTools(userId, toolNames);
 
@@ -40,9 +42,9 @@ export async function runAgentForSlack(userId: string, agentId: string | null, t
   const segments = composeSystemPrompt({
     agent,
     toolNames: tools.map((t: any) => t.name),
-    pinnedMemories: memories.filter((m: any) => (m.importance || 0) >= 8),
-    contextualMemories: memories.filter((m: any) => (m.importance || 0) < 8),
-    threadContextDocId: null,
+    pinnedMemories,
+    contextualMemories,
+    threadContextDocId: threadId,
   });
   const compiled = compilePrompt(segments, { maxTokens: 16_000 });
 

@@ -9,7 +9,7 @@ import crypto from "node:crypto";
 import { pool, createMessage, createThread, getAgent, updateMessage } from "@/lib/db";
 import { clientForUser, DEFAULT_MODEL } from "@/lib/llm";
 import { resolveAllTools } from "@/lib/tools";
-import { memoriesForContext } from "@/lib/memory";
+import { retrieveMemoriesForChat } from "@/lib/memory";
 import { composeSystemPrompt } from "@/lib/prompt-segments";
 import { compilePrompt } from "@/lib/prompt-compiler";
 import { computeCost, chargeCredits, balance } from "@/lib/credits";
@@ -94,7 +94,9 @@ export async function POST(req: Request) {
   const assistantMsg = await createMessage({ threadId, role: "assistant", content: "" });
 
   const agent = agentId ? await getAgent(agentId, userId) : null;
-  const memories = await memoriesForContext(userId, agentId, null);
+  // P25 — T1+T2 memory retrieval using the user's message as the cosine query
+  const { pinned: pinnedMemories, contextual: contextualMemories } =
+    await retrieveMemoriesForChat(userId, agentId, null, message);
   const toolNames = agent?.tools || ["web_search", "generate_artifact"];
   const { tools } = await resolveAllTools(userId, toolNames);
 
@@ -102,9 +104,9 @@ export async function POST(req: Request) {
   const segments = composeSystemPrompt({
     agent,
     toolNames: tools.map((t: any) => t.name),
-    pinnedMemories: memories.filter((m: any) => (m.importance || 0) >= 8),
-    contextualMemories: memories.filter((m: any) => (m.importance || 0) < 8),
-    threadContextDocId: null, // P24 wires this
+    pinnedMemories,
+    contextualMemories,
+    threadContextDocId: threadId,
   });
   const compiled = compilePrompt(segments, { maxTokens: 16_000 });
   const systemBlocks = compiled.systemBlocks;
@@ -128,9 +130,9 @@ export async function POST(req: Request) {
     cacheBoundaries: compiled.systemBlocks.filter(b => (b as any).cache_control).length,
   });
   emitter.emit("memory_read", {
-    count: memories.length,
-    pinnedCount: memories.filter((m: any) => (m.importance || 0) >= 8).length,
-    contextualCount: memories.filter((m: any) => (m.importance || 0) < 8).length,
+    count: pinnedMemories.length + contextualMemories.length,
+    pinnedCount: pinnedMemories.length,
+    contextualCount: contextualMemories.length,
   });
 
   // P27a — budget cap for v1 calls.

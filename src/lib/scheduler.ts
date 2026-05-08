@@ -14,7 +14,7 @@ import { withRetry } from "./providers";
 import { setBudgetCap, DEFAULT_SCHEDULED_RUN_BUDGET } from "./budget";
 import { composeSystemPrompt } from "./prompt-segments";
 import { compilePrompt } from "./prompt-compiler";
-import { memoriesForContext } from "./memory";
+import { retrieveMemoriesForChat } from "./memory";
 
 export async function runDueSchedules(): Promise<{ ran: number; skipped: number; errors: number }> {
   const schedules = await listAllActiveSchedules();
@@ -71,13 +71,16 @@ async function runSchedule(scheduleId: string) {
 
     const { tools } = await resolveAllTools(s.userId, agent.tools);
 
-    // P23 — layered prompt with cache_control breakpoints.
-    const memories = await memoriesForContext(s.userId, agent.id, null);
+    // P23 + P25 — layered prompt + T1/T2 memory retrieval. The schedule's
+    // prompt is the cosine query — usually a recurring instruction so its
+    // contextual matches will be stable across runs.
+    const { pinned: pinnedMemories, contextual: contextualMemories } =
+      await retrieveMemoriesForChat(s.userId, agent.id, null, s.prompt);
     const segments = composeSystemPrompt({
       agent,
       toolNames: tools.map((t: any) => t.name),
-      pinnedMemories: memories.filter((m: any) => (m.importance || 0) >= 8),
-      contextualMemories: memories.filter((m: any) => (m.importance || 0) < 8),
+      pinnedMemories,
+      contextualMemories,
       threadContextDocId: null,
     });
     const compiled = compilePrompt(segments, { maxTokens: 16_000 });
