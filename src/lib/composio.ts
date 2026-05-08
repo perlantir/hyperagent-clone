@@ -1,22 +1,10 @@
-// Composio integration layer.
+// Composio integration — TEMPORARILY STUBBED.
 //
-// Composio handles OAuth + credential storage + API execution for 500+
-// third-party services. We use `@composio/core` directly (no provider
-// package) and manually convert Composio's tool schemas to Anthropic format.
-//
-// Each Hyperagent user (u_xxx) maps directly to a Composio userId.
-
-import { Composio } from "@composio/core";
-
-let _composio: any = null;
-
-function client() {
-  if (_composio) return _composio;
-  const apiKey = process.env.COMPOSIO_API_KEY;
-  if (!apiKey) throw new Error("COMPOSIO_API_KEY is required");
-  _composio = new Composio({ apiKey });
-  return _composio;
-}
+// We attempted to wire @composio/core but the package version pinning was
+// unstable. The connector layer falls back to "no integrations connected"
+// until we revisit. The chat + builtin tools (web_search, generate_artifact,
+// browser_navigate, computer_use) keep working. Restore this when we lock
+// to a verified Composio SDK version.
 
 export interface ToolkitInfo {
   slug: string;
@@ -28,102 +16,36 @@ export interface ToolkitInfo {
   noAuth: boolean;
 }
 
-let _toolkitCache: ToolkitInfo[] | null = null;
-let _toolkitCacheAt = 0;
-
-export async function listToolkits(force = false): Promise<ToolkitInfo[]> {
-  const now = Date.now();
-  if (!force && _toolkitCache && now - _toolkitCacheAt < 1000 * 60 * 30) return _toolkitCache;
-  try {
-    const c = client();
-    const result = await (c.toolkits?.list?.() ?? c.apps?.list?.());
-    const items: any[] = Array.isArray(result) ? result : (result?.items || result?.toolkits || result?.apps || []);
-    _toolkitCache = items.map((t: any) => ({
-      slug: t.slug || t.key || t.name?.toLowerCase()?.replace(/\s+/g, "_") || "",
-      name: t.meta?.name || t.name || t.slug,
-      description: t.meta?.description || t.description || "",
-      logo: t.meta?.logo || t.logo || null,
-      categories: t.meta?.categories || t.categories || [],
-      authSchemes: t.auth_schemes || t.authSchemes || [],
-      noAuth: t.no_auth || t.noAuth || false,
-    })).filter(t => t.slug);
-    _toolkitCacheAt = now;
-    return _toolkitCache;
-  } catch (e: any) {
-    console.error("[composio] toolkits.list failed", e?.message);
-    return [];
-  }
+export async function listToolkits(): Promise<ToolkitInfo[]> {
+  // Static placeholder list — pure UI catalog with no actual Composio backend.
+  // When Composio is restored, replace with `composio.toolkits.list()`.
+  return [
+    { slug: "slack", name: "Slack", description: "Send messages to channels and DMs.", logo: null, categories: ["Communication"], authSchemes: ["oauth2"], noAuth: false },
+    { slug: "gmail", name: "Gmail", description: "Search inbox, draft replies, send email.", logo: null, categories: ["Communication"], authSchemes: ["oauth2"], noAuth: false },
+    { slug: "linear", name: "Linear", description: "Read issues, search cycles, create tasks.", logo: null, categories: ["Productivity"], authSchemes: ["api_key"], noAuth: false },
+    { slug: "notion", name: "Notion", description: "Read pages, append blocks, search database rows.", logo: null, categories: ["Productivity"], authSchemes: ["oauth2"], noAuth: false },
+    { slug: "github", name: "GitHub", description: "Search repos, read issues, create PRs.", logo: null, categories: ["Developer"], authSchemes: ["oauth2"], noAuth: false },
+    { slug: "stripe", name: "Stripe", description: "Read charges, customers, subscriptions.", logo: null, categories: ["Finance"], authSchemes: ["api_key"], noAuth: false },
+    { slug: "airtable", name: "Airtable", description: "Read and write Airtable bases.", logo: null, categories: ["Productivity"], authSchemes: ["api_key"], noAuth: false },
+    { slug: "hubspot", name: "HubSpot", description: "CRM contacts, deals, pipelines.", logo: null, categories: ["Sales"], authSchemes: ["oauth2"], noAuth: false },
+    { slug: "googledrive", name: "Google Drive", description: "Search and read Drive files.", logo: null, categories: ["Productivity"], authSchemes: ["oauth2"], noAuth: false },
+  ];
 }
 
-export async function initiateConnection(userId: string, toolkitSlug: string, callbackUrl?: string) {
-  try {
-    const c = client();
-    const fn = c.connectedAccounts?.initiate || c.connections?.initiate;
-    const conn = await fn.call(c.connectedAccounts || c.connections, userId, toolkitSlug, { callbackUrl });
-    return {
-      redirectUrl: conn?.redirectUrl || conn?.redirect_url || conn?.connectionUrl,
-      connectedAccountId: conn?.id || conn?.connectedAccountId,
-      status: conn?.status,
-    };
-  } catch (e: any) {
-    console.error("[composio] initiate failed", e?.message);
-    throw e;
-  }
+export async function initiateConnection(_userId: string, _toolkitSlug: string, _callbackUrl?: string) {
+  return { redirectUrl: null, connectedAccountId: null, status: "stub" };
 }
 
-export async function listConnectedAccounts(userId: string) {
-  try {
-    const c = client();
-    const fn = c.connectedAccounts?.list || c.connections?.list;
-    const result = await fn.call(c.connectedAccounts || c.connections, { userIds: [userId] });
-    const items: any[] = Array.isArray(result) ? result : (result?.items || []);
-    return items;
-  } catch (e: any) {
-    console.error("[composio] connectedAccounts.list failed", e?.message);
-    return [];
-  }
+export async function listConnectedAccounts(_userId: string): Promise<any[]> {
+  return [];
 }
 
-export async function deleteConnection(connectedAccountId: string) {
-  try {
-    const c = client();
-    const fn = c.connectedAccounts?.delete || c.connections?.delete;
-    await fn.call(c.connectedAccounts || c.connections, connectedAccountId);
-    return true;
-  } catch (e: any) {
-    console.error("[composio] delete failed", e?.message);
-    return false;
-  }
+export async function deleteConnection(_id: string) { return false; }
+
+export async function getComposioTools(_userId: string, _toolkits: string[]) {
+  return [] as { name: string; description: string; input_schema: any }[];
 }
 
-// Returns raw tool list, normalized to Anthropic format.
-export async function getComposioTools(userId: string, toolkits: string[]) {
-  if (!toolkits.length) return [];
-  try {
-    const c = client();
-    const fn = c.tools?.get || c.actions?.list;
-    const raw = await fn.call(c.tools || c.actions, { toolkits, apps: toolkits, userId });
-    const items: any[] = Array.isArray(raw) ? raw : (raw?.items || raw?.tools || raw?.actions || []);
-    return items.map((t: any) => ({
-      name: t.name || t.slug || t.key,
-      description: t.description || "",
-      input_schema: t.input_schema || t.parameters || t.inputSchema || { type: "object", properties: {} },
-    })).filter(t => t.name);
-  } catch (e: any) {
-    console.error("[composio] tools.get failed", e?.message);
-    return [];
-  }
-}
-
-export async function executeComposioTool(userId: string, name: string, input: any): Promise<string> {
-  try {
-    const c = client();
-    const fn = c.tools?.execute || c.actions?.execute;
-    const res = await fn.call(c.tools || c.actions, name, { userId, arguments: input, params: input });
-    if (typeof res === "string") return res;
-    if (res?.data) return JSON.stringify(res.data).slice(0, 6000);
-    return JSON.stringify(res).slice(0, 6000);
-  } catch (e: any) {
-    return `Composio error: ${e?.message || String(e)}`;
-  }
+export async function executeComposioTool(_userId: string, _name: string, _input: any): Promise<string> {
+  return "Composio integration is not yet wired up — coming soon.";
 }
