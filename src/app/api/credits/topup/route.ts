@@ -10,6 +10,6 @@ export async function POST(req: Request) {
   const { packageId } = await req.json().catch(() => ({}));
   const pkg = PACKAGES.find(p => p.id === packageId);
   if (!pkg) return NextResponse.json({ error: "unknown package" }, { status: 400 });
-  topUp(user.id, pkg.credits, `Top-up: ${pkg.name} ($${pkg.priceUsd})`);
+  await topUp(user.id, pkg.credits, `Top-up: ${pkg.name} ($${pkg.priceUsd})`);
   return NextResponse.json({ ok: true, added: pkg.credits });
 }

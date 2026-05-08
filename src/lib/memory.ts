@@ -3,8 +3,8 @@ import type { Memory } from "./types";
 
 // Surface memories for a particular agent + project context. Used to extend
 // the system prompt at chat time.
-export function memoriesForContext(userId: string, agentId: string | null, projectId: string | null): Memory[] {
-  const all = listMemories(userId);
+export async function memoriesForContext(userId: string, agentId: string | null, projectId: string | null): Promise<Memory[]> {
+  const all = await listMemories(userId);
   // Keep memories that are global (no agentId, no projectId) OR scoped to this agent OR this project.
   return all.filter(m =>
     (m.agentId === null || m.agentId === agentId) &&

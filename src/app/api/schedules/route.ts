@@ -5,7 +5,7 @@ import { listSchedules, createSchedule } from "@/lib/db";
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  return NextResponse.json({ schedules: listSchedules(user.id) });
+  return NextResponse.json({ schedules: await listSchedules(user.id) });
 }
 
 export async function POST(req: Request) {
@@ -13,7 +13,7 @@ export async function POST(req: Request) {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const { agentId, prompt, intervalMinutes } = await req.json().catch(() => ({}));
   if (!agentId || !prompt) return NextResponse.json({ error: "agentId and prompt required" }, { status: 400 });
-  const s = createSchedule({
+  const s = await createSchedule({
     userId: user.id,
     agentId,
     prompt,

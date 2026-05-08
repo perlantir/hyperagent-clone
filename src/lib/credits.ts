@@ -13,16 +13,16 @@ export function computeCost(inputTokens: number, outputTokens: number): number {
   return flat + inCost + outCost;
 }
 
-export function chargeCredits(userId: string, amount: number, reason: string, ref: string | null = null) {
-  addCredits(userId, -Math.abs(amount), reason, ref);
+export async function chargeCredits(userId: string, amount: number, reason: string, ref: string | null = null) {
+  await addCredits(userId, -Math.abs(amount), reason, ref);
 }
 
-export function topUp(userId: string, amount: number, reason = "Top-up") {
-  addCredits(userId, Math.abs(amount), reason, null);
+export async function topUp(userId: string, amount: number, reason = "Top-up") {
+  await addCredits(userId, Math.abs(amount), reason, null);
 }
 
-export function balance(userId: string): number {
-  return getCreditBalance(userId);
+export async function balance(userId: string): Promise<number> {
+  return await getCreditBalance(userId);
 }
 
 // Top-up packages (used by the billing page)

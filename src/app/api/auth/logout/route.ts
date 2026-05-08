@@ -5,7 +5,7 @@ import { SESSION_COOKIE, clearSessionCookie } from "@/lib/auth";
 
 export async function POST() {
   const c = cookies().get(SESSION_COOKIE);
-  if (c?.value) destroySession(c.value);
-  clearSessionCookie();
+  if (c?.value) await destroySession(c.value);
+  await clearSessionCookie();
   return NextResponse.json({ ok: true });
 }

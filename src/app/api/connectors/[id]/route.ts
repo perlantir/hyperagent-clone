@@ -14,13 +14,13 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   for (const f of conn.credentialFields) {
     if (!credentials[f.name]) return NextResponse.json({ error: `${f.label} required` }, { status: 400 });
   }
-  const cc = upsertConnectorCredentials(user.id, params.id, label || conn.name, credentials);
+  const cc = await upsertConnectorCredentials(user.id, params.id, label || conn.name, credentials);
   return NextResponse.json({ ok: true, id: cc.id });
 }
 
 export async function DELETE(_: Request, { params }: { params: { id: string } }) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  deleteConnectorCredentials(user.id, params.id);
+  await deleteConnectorCredentials(user.id, params.id);
   return NextResponse.json({ ok: true });
 }

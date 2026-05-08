@@ -5,10 +5,10 @@ import { setSessionCookie } from "@/lib/auth";
 export async function POST(req: Request) {
   const { email, password, name } = await req.json().catch(() => ({}));
   if (!email || !password || !name) return NextResponse.json({ error: "email, password, name required" }, { status: 400 });
-  if (getUserByEmail(email)) return NextResponse.json({ error: "Email already in use" }, { status: 409 });
-  const user = createUser(email, password, name);
+  if (await getUserByEmail(email)) return NextResponse.json({ error: "Email already in use" }, { status: 409 });
+  const user = await createUser(email, password, name);
   // Seed a default agent
-  createAgent({
+  await createAgent({
     userId: user.id,
     name: "General assistant",
     icon: "G",
@@ -17,6 +17,6 @@ export async function POST(req: Request) {
     systemPrompt: "You are a helpful AI assistant. Be concise and accurate. When you do not know something, say so. Use tools when relevant.",
     tools: ["web_search", "generate_artifact"],
   });
-  setSessionCookie(user.id);
+  await setSessionCookie(user.id);
   return NextResponse.json({ id: user.id, email: user.email, name: user.name });
 }

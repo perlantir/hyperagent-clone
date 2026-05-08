@@ -5,5 +5,5 @@ import { listRuns } from "@/lib/db";
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  return NextResponse.json({ runs: listRuns(user.id) });
+  return NextResponse.json({ runs: await listRuns(user.id) });
 }

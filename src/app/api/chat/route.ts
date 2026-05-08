@@ -33,37 +33,37 @@ export async function POST(req: Request) {
   const { threadId, content, useRouter } = await req.json().catch(() => ({}));
   if (!threadId || !content) return NextResponse.json({ error: "threadId and content required" }, { status: 400 });
 
-  const thread = getThread(threadId, user.id);
+  const thread = await getThread(threadId, user.id);
   if (!thread) return NextResponse.json({ error: "thread not found" }, { status: 404 });
 
-  if (balance(user.id) <= 0) return NextResponse.json({ error: "out of credits" }, { status: 402 });
+  if (await balance(user.id) <= 0) return NextResponse.json({ error: "out of credits" }, { status: 402 });
 
   // Save user message.
-  createMessage({ threadId, role: "user", content });
-  if (listMessages(threadId).filter(m => m.role === "user").length === 1) {
+  await createMessage({ threadId, role: "user", content });
+  if ((await listMessages(threadId)).filter(m => m.role === "user").length === 1) {
     // First user message → use it as title (truncated).
-    updateThread(threadId, user.id, { title: content.slice(0, 60) });
+    await updateThread(threadId, user.id, { title: content.slice(0, 60) });
   }
 
   // Smart routing: if useRouter is true and thread has no agent, pick one.
   let agentId = thread.agentId;
   let routerNote: { agentId: string; reason: string } | null = null;
   if (useRouter && !agentId) {
-    const agents = listAgents(user.id).filter(a => a.name.toLowerCase() !== "router");
+    const agents = (await listAgents(user.id)).filter(a => a.name.toLowerCase() !== "router");
     try {
       const decision = await routeMessage(content, agents);
       agentId = decision.agentId;
       routerNote = decision;
-      updateThread(threadId, user.id, { agentId });
+      await updateThread(threadId, user.id, { agentId });
     } catch (e) {
       console.error("[router]", e);
     }
   }
 
-  const agent = agentId ? getAgent(agentId, user.id) : null;
+  const agent = agentId ? await getAgent(agentId, user.id) : null;
 
   // Build system prompt.
-  const memories = memoriesForContext(user.id, agent?.id ?? null, thread.projectId);
+  const memories = await memoriesForContext(user.id, agent?.id ?? null, thread.projectId);
   const systemPrompt = (agent?.systemPrompt || "You are a helpful AI assistant.") + memoriesAsSystemBlock(memories);
 
   // Resolve tools.
@@ -71,7 +71,7 @@ export async function POST(req: Request) {
   const tools = await resolveTools(toolNames, user.id);
 
   // Build the conversation history for Anthropic.
-  const allMsgs = listMessages(threadId);
+  const allMsgs = await listMessages(threadId);
   const anthropicMessages: any[] = [];
   for (const m of allMsgs) {
     if (m.role === "user") anthropicMessages.push({ role: "user", content: m.content });
@@ -82,7 +82,7 @@ export async function POST(req: Request) {
   // Last message in DB is the user message we just stored — anthropicMessages already includes it.
 
   // Create the assistant message shell that we'll accumulate into.
-  const assistantMsg = createMessage({ threadId, role: "assistant", content: "" });
+  const assistantMsg = await createMessage({ threadId, role: "assistant", content: "" });
   const ctx: ToolCtx = { userId: user.id, threadId, messageId: assistantMsg.id, artifactsCreated: [] };
 
   const encoder = new TextEncoder();
@@ -177,15 +177,15 @@ export async function POST(req: Request) {
         }
 
         // Persist the final assistant message.
-        const cost = computeCost(totalIn, totalOut);
-        updateMessage(assistantMsg.id, {
+        const cost = await computeCost(totalIn, totalOut);
+        await updateMessage(assistantMsg.id, {
           content: accumulatedText,
           toolCalls: toolCallsPersisted,
           artifactIds,
           costCredits: cost,
         });
-        chargeCredits(user.id, cost, "Chat", assistantMsg.id);
-        updateThread(threadId, user.id, { updatedAt: Date.now() });
+        await chargeCredits(user.id, cost, "Chat", assistantMsg.id);
+        await updateThread(threadId, user.id, { updatedAt: Date.now() });
 
         send({ type: "done", messageId: assistantMsg.id, costCredits: cost });
         controller.close();

@@ -7,7 +7,7 @@ export const SESSION_COOKIE = "hyperagent_session";
 export async function getCurrentUser(): Promise<User | null> {
   const c = cookies().get(SESSION_COOKIE);
   if (!c?.value) return null;
-  return getSessionUser(c.value);
+  return await getSessionUser(c.value);
 }
 
 export async function requireUser(): Promise<User> {
@@ -16,8 +16,8 @@ export async function requireUser(): Promise<User> {
   return u;
 }
 
-export function setSessionCookie(userId: string) {
-  const sid = createSession(userId);
+export async function setSessionCookie(userId: string) {
+  const sid = await createSession(userId);
   cookies().set(SESSION_COOKIE, sid, {
     httpOnly: true,
     sameSite: "lax",

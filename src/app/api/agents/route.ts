@@ -5,14 +5,14 @@ import { listAgents, createAgent } from "@/lib/db";
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  return NextResponse.json({ agents: listAgents(user.id) });
+  return NextResponse.json({ agents: await listAgents(user.id) });
 }
 
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const body = await req.json().catch(() => ({}));
-  const a = createAgent({
+  const a = await createAgent({
     userId: user.id,
     name: body.name || "Untitled Agent",
     icon: (body.icon || (body.name?.[0] || "A").toUpperCase()).slice(0, 1),

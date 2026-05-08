@@ -5,9 +5,9 @@ import { getArtifact, getThread, listArtifactsForUser } from "@/lib/db";
 export async function GET(req: Request, { params }: { params: { id: string } }) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const a = getArtifact(params.id);
+  const a = await getArtifact(params.id);
   if (!a) return NextResponse.json({ error: "not found" }, { status: 404 });
-  const thread = getThread(a.threadId, user.id);
+  const thread = await getThread(a.threadId, user.id);
   if (!thread) return NextResponse.json({ error: "not found" }, { status: 404 });
 
   const url = new URL(req.url);

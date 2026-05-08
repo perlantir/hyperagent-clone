@@ -1,125 +1,140 @@
-import Database from "better-sqlite3";
-import path from "node:path";
-import fs from "node:fs";
+// Postgres data layer (Phase 11 — Vercel migration).
+// Uses node-postgres (pg). All functions are async. Schema is created lazily
+// on first connection. Demo seed data is only inserted if the users table is
+// empty.
+//
+// Set DATABASE_URL in env. For Vercel + Neon, paste the connection string.
+
+import { Pool } from "pg";
 import crypto from "node:crypto";
 import type {
   User, Thread, Message, Agent, Artifact, Schedule, Run,
   Project, Memory, ConnectorCredential, Skill, CreditTransaction,
 } from "./types";
 
-const DB_PATH = process.env.DB_PATH || path.join(process.cwd(), "data", "hyperagent.db");
-let _db: Database.Database | null = null;
+let _pool: Pool | null = null;
+let _initialized = false;
 
-export function getDb() {
-  if (_db) return _db;
-  fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-  _db = new Database(DB_PATH);
-  _db.pragma("journal_mode = WAL");
-  _db.pragma("foreign_keys = ON");
-  initSchema(_db);
-  seedIfEmpty(_db);
-  return _db;
+export function pool(): Pool {
+  if (_pool) return _pool;
+  const conn = process.env.DATABASE_URL;
+  if (!conn) throw new Error("DATABASE_URL is required (Postgres connection string)");
+  _pool = new Pool({
+    connectionString: conn,
+    ssl: conn.includes("localhost") ? false : { rejectUnauthorized: false },
+    max: 10,
+  });
+  return _pool;
 }
 
-function initSchema(db: Database.Database) {
-  db.exec(`
+async function ensureInit() {
+  if (_initialized) return;
+  await initSchema();
+  await seedIfEmpty();
+  _initialized = true;
+}
+
+async function initSchema() {
+  await pool().query(`
     CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, passwordHash TEXT NOT NULL,
-      name TEXT NOT NULL, createdAt INTEGER NOT NULL
+      id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, "passwordHash" TEXT NOT NULL,
+      name TEXT NOT NULL, "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
-      id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id), expiresAt INTEGER NOT NULL
+      id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id), "expiresAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS projects (
-      id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id),
-      name TEXT NOT NULL, description TEXT NOT NULL, color TEXT NOT NULL, createdAt INTEGER NOT NULL
+      id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id),
+      name TEXT NOT NULL, description TEXT NOT NULL, color TEXT NOT NULL, "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS agents (
-      id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id),
-      projectId TEXT REFERENCES projects(id) ON DELETE SET NULL,
+      id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id),
+      "projectId" TEXT REFERENCES projects(id) ON DELETE SET NULL,
       name TEXT NOT NULL, icon TEXT NOT NULL, color TEXT NOT NULL,
-      description TEXT NOT NULL, systemPrompt TEXT NOT NULL,
-      tools TEXT NOT NULL, connectorIds TEXT NOT NULL DEFAULT '[]',
-      routerHint TEXT NOT NULL DEFAULT '',
-      createdAt INTEGER NOT NULL
+      description TEXT NOT NULL, "systemPrompt" TEXT NOT NULL,
+      tools TEXT NOT NULL, "connectorIds" TEXT NOT NULL DEFAULT '[]',
+      "routerHint" TEXT NOT NULL DEFAULT '',
+      "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS threads (
-      id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id),
-      projectId TEXT REFERENCES projects(id) ON DELETE SET NULL,
-      title TEXT NOT NULL, agentId TEXT REFERENCES agents(id) ON DELETE SET NULL,
-      createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL
+      id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id),
+      "projectId" TEXT REFERENCES projects(id) ON DELETE SET NULL,
+      title TEXT NOT NULL, "agentId" TEXT REFERENCES agents(id) ON DELETE SET NULL,
+      "createdAt" BIGINT NOT NULL, "updatedAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY, threadId TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      id TEXT PRIMARY KEY, "threadId" TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
       role TEXT NOT NULL, content TEXT NOT NULL,
-      toolCalls TEXT, artifactIds TEXT, model TEXT, costCredits INTEGER,
-      createdAt INTEGER NOT NULL
+      "toolCalls" TEXT, "artifactIds" TEXT, model TEXT, "costCredits" INTEGER,
+      "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS artifacts (
       id TEXT PRIMARY KEY,
-      threadId TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
-      messageId TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-      type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, createdAt INTEGER NOT NULL
+      "threadId" TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+      "messageId" TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      type TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS memories (
-      id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id),
-      agentId TEXT REFERENCES agents(id) ON DELETE CASCADE,
-      projectId TEXT REFERENCES projects(id) ON DELETE CASCADE,
-      content TEXT NOT NULL, importance INTEGER NOT NULL DEFAULT 5, createdAt INTEGER NOT NULL
+      id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id),
+      "agentId" TEXT REFERENCES agents(id) ON DELETE CASCADE,
+      "projectId" TEXT REFERENCES projects(id) ON DELETE CASCADE,
+      content TEXT NOT NULL, importance INTEGER NOT NULL DEFAULT 5, "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS connector_credentials (
-      id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id),
-      connectorId TEXT NOT NULL, label TEXT NOT NULL,
-      credentials TEXT NOT NULL, createdAt INTEGER NOT NULL
+      id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id),
+      "connectorId" TEXT NOT NULL, label TEXT NOT NULL,
+      credentials TEXT NOT NULL, "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS skills (
-      id TEXT PRIMARY KEY, userId TEXT REFERENCES users(id),
+      id TEXT PRIMARY KEY, "userId" TEXT REFERENCES users(id),
       name TEXT NOT NULL, description TEXT NOT NULL, category TEXT NOT NULL,
-      systemPromptAddition TEXT NOT NULL, toolHints TEXT NOT NULL DEFAULT '[]',
-      isTemplate INTEGER NOT NULL DEFAULT 0,
-      installedFromTemplate TEXT, createdAt INTEGER NOT NULL
+      "systemPromptAddition" TEXT NOT NULL, "toolHints" TEXT NOT NULL DEFAULT '[]',
+      "isTemplate" INTEGER NOT NULL DEFAULT 0,
+      "installedFromTemplate" TEXT, "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS credit_transactions (
-      id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id),
-      amount INTEGER NOT NULL, reason TEXT NOT NULL, ref TEXT, createdAt INTEGER NOT NULL
+      id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id),
+      amount INTEGER NOT NULL, reason TEXT NOT NULL, ref TEXT, "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS schedules (
-      id TEXT PRIMARY KEY, userId TEXT NOT NULL REFERENCES users(id),
-      agentId TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id),
+      "agentId" TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
       name TEXT NOT NULL DEFAULT 'Automation',
-      prompt TEXT NOT NULL, intervalMinutes INTEGER NOT NULL,
-      active INTEGER NOT NULL DEFAULT 1, lastRunAt INTEGER, createdAt INTEGER NOT NULL
+      prompt TEXT NOT NULL, "intervalMinutes" INTEGER NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1, "lastRunAt" BIGINT, "createdAt" BIGINT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
-      scheduleId TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
-      threadId TEXT, status TEXT NOT NULL, output TEXT NOT NULL,
-      startedAt INTEGER NOT NULL, endedAt INTEGER
+      "scheduleId" TEXT NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+      "threadId" TEXT, status TEXT NOT NULL, output TEXT NOT NULL,
+      "startedAt" BIGINT NOT NULL, "endedAt" BIGINT
     );
-    CREATE INDEX IF NOT EXISTS idx_threads_user ON threads(userId, updatedAt DESC);
-    CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(threadId, createdAt);
-    CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(threadId);
-    CREATE INDEX IF NOT EXISTS idx_runs_schedule ON runs(scheduleId, startedAt DESC);
-    CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(userId, importance DESC);
-    CREATE INDEX IF NOT EXISTS idx_credit_tx_user ON credit_transactions(userId, createdAt DESC);
+    CREATE INDEX IF NOT EXISTS idx_threads_user ON threads("userId", "updatedAt" DESC);
+    CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages("threadId", "createdAt");
+    CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts("threadId");
+    CREATE INDEX IF NOT EXISTS idx_runs_schedule ON runs("scheduleId", "startedAt" DESC);
+    CREATE INDEX IF NOT EXISTS idx_memories_user ON memories("userId", importance DESC);
+    CREATE INDEX IF NOT EXISTS idx_credit_tx_user ON credit_transactions("userId", "createdAt" DESC);
   `);
 }
 
-function seedIfEmpty(db: Database.Database) {
-  const userCount = (db.prepare("SELECT COUNT(*) as c FROM users").get() as { c: number }).c;
-  if (userCount > 0) return;
+async function seedIfEmpty() {
+  const r = await pool().query(`SELECT COUNT(*)::int as c FROM users`);
+  if (r.rows[0]?.c > 0) return;
+  const now = Date.now();
   const id = "u_demo";
   const pw = hashPassword("demo");
-  db.prepare("INSERT INTO users (id,email,passwordHash,name,createdAt) VALUES (?,?,?,?,?)").run(
-    id, "demo@hyperagent.local", pw, "Demo User", Date.now(),
+  await pool().query(
+    `INSERT INTO users (id,email,"passwordHash",name,"createdAt") VALUES ($1,$2,$3,$4,$5)`,
+    [id, "demo@hyperagent.local", pw, "Demo User", now],
   );
 
-  // Seed projects
   const projWork = uid("p");
-  db.prepare("INSERT INTO projects (id,userId,name,description,color,createdAt) VALUES (?,?,?,?,?,?)")
-    .run(projWork, id, "Work", "Day-to-day work threads", "orange", Date.now());
+  await pool().query(
+    `INSERT INTO projects (id,"userId",name,description,color,"createdAt") VALUES ($1,$2,$3,$4,$5,$6)`,
+    [projWork, id, "Work", "Day-to-day work threads", "orange", now],
+  );
 
-  // Seed agents
   const agents = [
     { id: "a_research", name: "Research Analyst", icon: "R", color: "orange",
       description: "Reads news, papers, and filings. Cites sources. Skeptical by default.",
@@ -141,21 +156,26 @@ function seedIfEmpty(db: Database.Database) {
       systemPrompt: "You are a router. Read each user message, decide which specialist agent should handle it, and respond with JSON: { \"agentId\": \"...\", \"reason\": \"...\" }.",
       tools: [], connectorIds: [], routerHint: "(reserved)" },
   ];
-  const insAgent = db.prepare(
-    "INSERT INTO agents (id,userId,projectId,name,icon,color,description,systemPrompt,tools,connectorIds,routerHint,createdAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-  );
   for (const a of agents) {
-    insAgent.run(a.id, id, null, a.name, a.icon, a.color, a.description, a.systemPrompt,
-      JSON.stringify(a.tools), JSON.stringify(a.connectorIds), a.routerHint, Date.now());
+    await pool().query(
+      `INSERT INTO agents (id,"userId","projectId",name,icon,color,description,"systemPrompt",tools,"connectorIds","routerHint","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [a.id, id, null, a.name, a.icon, a.color, a.description, a.systemPrompt,
+       JSON.stringify(a.tools), JSON.stringify(a.connectorIds), a.routerHint, now],
+    );
   }
 
-  // Seed memories
-  const insMem = db.prepare("INSERT INTO memories (id,userId,agentId,projectId,content,importance,createdAt) VALUES (?,?,?,?,?,?,?)");
-  insMem.run(uid("mem"), id, null, null, "User name is Mira Chen. Prefers takeaway-first format. Skip filler — she edits hard.", 9, Date.now());
-  insMem.run(uid("mem"), id, null, null, "Citations as footnotes, not inline.", 7, Date.now());
-  insMem.run(uid("mem"), id, "a_research", null, "Surface contradictions in evidence rather than smoothing them over.", 8, Date.now());
+  const memories = [
+    { content: "User name is Mira Chen. Prefers takeaway-first format. Skip filler — she edits hard.", importance: 9, agentId: null },
+    { content: "Citations as footnotes, not inline.", importance: 7, agentId: null },
+    { content: "Surface contradictions in evidence rather than smoothing them over.", importance: 8, agentId: "a_research" },
+  ];
+  for (const m of memories) {
+    await pool().query(
+      `INSERT INTO memories (id,"userId","agentId","projectId",content,importance,"createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [uid("mem"), id, m.agentId, null, m.content, m.importance, now],
+    );
+  }
 
-  // Seed skill templates (global, userId NULL)
   const skillTemplates = [
     { name: "Stripe operator", category: "Developer",
       description: "Read charges, customers, and subscription data via the Stripe API.",
@@ -194,17 +214,17 @@ function seedIfEmpty(db: Database.Database) {
       systemPromptAddition: "Output: # Decisions, # Open questions, # Action items (owner, item, due). No filler.",
       toolHints: [] },
   ];
-  const insSkill = db.prepare(
-    "INSERT INTO skills (id,userId,name,description,category,systemPromptAddition,toolHints,isTemplate,installedFromTemplate,createdAt) VALUES (?,?,?,?,?,?,?,?,?,?)",
-  );
   for (const s of skillTemplates) {
-    insSkill.run(uid("sk"), null, s.name, s.description, s.category, s.systemPromptAddition,
-      JSON.stringify(s.toolHints), 1, null, Date.now());
+    await pool().query(
+      `INSERT INTO skills (id,"userId",name,description,category,"systemPromptAddition","toolHints","isTemplate","installedFromTemplate","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [uid("sk"), null, s.name, s.description, s.category, s.systemPromptAddition,
+       JSON.stringify(s.toolHints), 1, null, now],
+    );
   }
 
-  // Seed credits
-  db.prepare("INSERT INTO credit_transactions (id,userId,amount,reason,ref,createdAt) VALUES (?,?,?,?,?,?)").run(
-    uid("ct"), id, 10000, "Welcome bonus", null, Date.now(),
+  await pool().query(
+    `INSERT INTO credit_transactions (id,"userId",amount,reason,ref,"createdAt") VALUES ($1,$2,$3,$4,$5,$6)`,
+    [uid("ct"), id, 10000, "Welcome bonus", null, now],
   );
 }
 
@@ -221,279 +241,291 @@ export function verifyPassword(pw: string, stored: string) {
 }
 export function uid(prefix = "x") { return `${prefix}_${crypto.randomBytes(8).toString("hex")}`; }
 
+async function q<T = any>(sql: string, params: any[] = []): Promise<T[]> {
+  await ensureInit();
+  const r = await pool().query(sql, params);
+  return r.rows as T[];
+}
+async function qOne<T = any>(sql: string, params: any[] = []): Promise<T | null> {
+  const rows = await q<T>(sql, params);
+  return rows[0] || null;
+}
+
 // USERS
-export function getUserByEmail(email: string): (User & { passwordHash: string }) | null {
-  return getDb().prepare("SELECT * FROM users WHERE email = ?").get(email) as any || null;
+export async function getUserByEmail(email: string): Promise<(User & { passwordHash: string }) | null> {
+  return qOne(`SELECT * FROM users WHERE email = $1`, [email]);
 }
-export function getUserById(id: string): User | null {
-  return getDb().prepare("SELECT id,email,name,createdAt FROM users WHERE id = ?").get(id) as any || null;
+export async function getUserById(id: string): Promise<User | null> {
+  return qOne(`SELECT id,email,name,"createdAt" FROM users WHERE id = $1`, [id]);
 }
-export function createUser(email: string, password: string, name: string): User {
+export async function createUser(email: string, password: string, name: string): Promise<User> {
   const id = uid("u"); const now = Date.now();
-  getDb().prepare("INSERT INTO users (id,email,passwordHash,name,createdAt) VALUES (?,?,?,?,?)")
-    .run(id, email, hashPassword(password), name, now);
-  // Welcome credits
-  getDb().prepare("INSERT INTO credit_transactions (id,userId,amount,reason,ref,createdAt) VALUES (?,?,?,?,?,?)")
-    .run(uid("ct"), id, 5000, "Welcome bonus", null, now);
+  await q(`INSERT INTO users (id,email,"passwordHash",name,"createdAt") VALUES ($1,$2,$3,$4,$5)`,
+    [id, email, hashPassword(password), name, now]);
+  await q(`INSERT INTO credit_transactions (id,"userId",amount,reason,ref,"createdAt") VALUES ($1,$2,$3,$4,$5,$6)`,
+    [uid("ct"), id, 5000, "Welcome bonus", null, now]);
   return { id, email, name, createdAt: now };
 }
 
 // SESSIONS
-export function createSession(userId: string): string {
+export async function createSession(userId: string): Promise<string> {
   const id = crypto.randomBytes(24).toString("hex");
   const expiresAt = Date.now() + 1000 * 60 * 60 * 24 * 30;
-  getDb().prepare("INSERT INTO sessions (id,userId,expiresAt) VALUES (?,?,?)").run(id, userId, expiresAt);
+  await q(`INSERT INTO sessions (id,"userId","expiresAt") VALUES ($1,$2,$3)`, [id, userId, expiresAt]);
   return id;
 }
-export function getSessionUser(sessionId: string): User | null {
-  return getDb().prepare(`SELECT u.id,u.email,u.name,u.createdAt FROM sessions s JOIN users u ON u.id=s.userId WHERE s.id=? AND s.expiresAt>?`).get(sessionId, Date.now()) as any || null;
+export async function getSessionUser(sessionId: string): Promise<User | null> {
+  return qOne(
+    `SELECT u.id,u.email,u.name,u."createdAt" FROM sessions s JOIN users u ON u.id=s."userId" WHERE s.id=$1 AND s."expiresAt">$2`,
+    [sessionId, Date.now()],
+  );
 }
-export function destroySession(sessionId: string) {
-  getDb().prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
+export async function destroySession(sessionId: string) {
+  await q(`DELETE FROM sessions WHERE id=$1`, [sessionId]);
 }
 
 // PROJECTS
-export function listProjects(userId: string): Project[] {
-  return getDb().prepare("SELECT * FROM projects WHERE userId=? ORDER BY createdAt").all(userId) as Project[];
+export async function listProjects(userId: string): Promise<Project[]> {
+  return q(`SELECT * FROM projects WHERE "userId"=$1 ORDER BY "createdAt"`, [userId]);
 }
-export function getProject(id: string, userId: string): Project | null {
-  return getDb().prepare("SELECT * FROM projects WHERE id=? AND userId=?").get(id, userId) as any || null;
+export async function getProject(id: string, userId: string): Promise<Project | null> {
+  return qOne(`SELECT * FROM projects WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
-export function createProject(p: Omit<Project,"id"|"createdAt">): Project {
+export async function createProject(p: Omit<Project,"id"|"createdAt">): Promise<Project> {
   const id = uid("p"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO projects (id,userId,name,description,color,createdAt) VALUES (?,?,?,?,?,?)")
-    .run(id, p.userId, p.name, p.description, p.color, createdAt);
+  await q(`INSERT INTO projects (id,"userId",name,description,color,"createdAt") VALUES ($1,$2,$3,$4,$5,$6)`,
+    [id, p.userId, p.name, p.description, p.color, createdAt]);
   return { ...p, id, createdAt };
 }
-export function deleteProject(id: string, userId: string) {
-  getDb().prepare("DELETE FROM projects WHERE id=? AND userId=?").run(id, userId);
+export async function deleteProject(id: string, userId: string) {
+  await q(`DELETE FROM projects WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
 
 // THREADS
-export function listThreads(userId: string, projectId?: string | null): Thread[] {
+export async function listThreads(userId: string, projectId?: string | null): Promise<Thread[]> {
   if (projectId === undefined) {
-    return getDb().prepare("SELECT * FROM threads WHERE userId=? ORDER BY updatedAt DESC").all(userId) as Thread[];
+    return q(`SELECT * FROM threads WHERE "userId"=$1 ORDER BY "updatedAt" DESC`, [userId]);
   }
-  return getDb().prepare("SELECT * FROM threads WHERE userId=? AND projectId IS ? ORDER BY updatedAt DESC").all(userId, projectId) as Thread[];
+  return q(`SELECT * FROM threads WHERE "userId"=$1 AND "projectId" IS NOT DISTINCT FROM $2 ORDER BY "updatedAt" DESC`,
+    [userId, projectId]);
 }
-export function getThread(id: string, userId: string): Thread | null {
-  return getDb().prepare("SELECT * FROM threads WHERE id=? AND userId=?").get(id, userId) as any || null;
+export async function getThread(id: string, userId: string): Promise<Thread | null> {
+  return qOne(`SELECT * FROM threads WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
-export function createThread(userId: string, title: string, agentId: string | null, projectId: string | null = null): Thread {
+export async function createThread(userId: string, title: string, agentId: string | null, projectId: string | null = null): Promise<Thread> {
   const id = uid("t"); const now = Date.now();
-  getDb().prepare("INSERT INTO threads (id,userId,projectId,title,agentId,createdAt,updatedAt) VALUES (?,?,?,?,?,?,?)")
-    .run(id, userId, projectId, title, agentId, now, now);
+  await q(`INSERT INTO threads (id,"userId","projectId",title,"agentId","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [id, userId, projectId, title, agentId, now, now]);
   return { id, userId, projectId, title, agentId, createdAt: now, updatedAt: now };
 }
-export function updateThread(id: string, userId: string, fields: { title?: string; updatedAt?: number; agentId?: string | null; projectId?: string | null }) {
-  const cur = getThread(id, userId); if (!cur) return;
-  const next = { ...cur, ...fields, updatedAt: Date.now() };
-  getDb().prepare("UPDATE threads SET title=?,agentId=?,projectId=?,updatedAt=? WHERE id=? AND userId=?")
-    .run(next.title, next.agentId, next.projectId, next.updatedAt, id, userId);
+export async function updateThread(id: string, userId: string, fields: { title?: string; updatedAt?: number; agentId?: string | null; projectId?: string | null }) {
+  const cur = await getThread(id, userId); if (!cur) return;
+  const n = { ...cur, ...fields, updatedAt: Date.now() };
+  await q(`UPDATE threads SET title=$1,"agentId"=$2,"projectId"=$3,"updatedAt"=$4 WHERE id=$5 AND "userId"=$6`,
+    [n.title, n.agentId, n.projectId, n.updatedAt, id, userId]);
 }
-export function deleteThread(id: string, userId: string) {
-  getDb().prepare("DELETE FROM threads WHERE id=? AND userId=?").run(id, userId);
+export async function deleteThread(id: string, userId: string) {
+  await q(`DELETE FROM threads WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
 
 // MESSAGES
-export function listMessages(threadId: string): Message[] {
-  const rows = getDb().prepare("SELECT * FROM messages WHERE threadId=? ORDER BY createdAt").all(threadId) as any[];
+export async function listMessages(threadId: string): Promise<Message[]> {
+  const rows = await q<any>(`SELECT * FROM messages WHERE "threadId"=$1 ORDER BY "createdAt"`, [threadId]);
   return rows.map(r => ({
     ...r,
     toolCalls: r.toolCalls ? JSON.parse(r.toolCalls) : undefined,
     artifactIds: r.artifactIds ? JSON.parse(r.artifactIds) : undefined,
   }));
 }
-export function createMessage(m: Omit<Message,"id"|"createdAt">): Message {
+export async function createMessage(m: Omit<Message,"id"|"createdAt">): Promise<Message> {
   const id = uid("m"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO messages (id,threadId,role,content,toolCalls,artifactIds,model,costCredits,createdAt) VALUES (?,?,?,?,?,?,?,?,?)")
-    .run(id, m.threadId, m.role, m.content,
-      m.toolCalls ? JSON.stringify(m.toolCalls) : null,
-      m.artifactIds ? JSON.stringify(m.artifactIds) : null,
-      m.model || null, m.costCredits ?? null, createdAt);
+  await q(`INSERT INTO messages (id,"threadId",role,content,"toolCalls","artifactIds",model,"costCredits","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [id, m.threadId, m.role, m.content,
+     m.toolCalls ? JSON.stringify(m.toolCalls) : null,
+     m.artifactIds ? JSON.stringify(m.artifactIds) : null,
+     m.model || null, m.costCredits ?? null, createdAt]);
   return { ...m, id, createdAt };
 }
-export function updateMessage(id: string, fields: Partial<Pick<Message,"content"|"toolCalls"|"artifactIds"|"costCredits">>) {
-  const cur = getDb().prepare("SELECT * FROM messages WHERE id=?").get(id) as any;
+export async function updateMessage(id: string, fields: Partial<Pick<Message,"content"|"toolCalls"|"artifactIds"|"costCredits">>) {
+  const cur = await qOne<any>(`SELECT * FROM messages WHERE id=$1`, [id]);
   if (!cur) return;
   const content = fields.content !== undefined ? fields.content : cur.content;
   const toolCalls = fields.toolCalls !== undefined ? JSON.stringify(fields.toolCalls) : cur.toolCalls;
   const artifactIds = fields.artifactIds !== undefined ? JSON.stringify(fields.artifactIds) : cur.artifactIds;
   const costCredits = fields.costCredits !== undefined ? fields.costCredits : cur.costCredits;
-  getDb().prepare("UPDATE messages SET content=?,toolCalls=?,artifactIds=?,costCredits=? WHERE id=?")
-    .run(content, toolCalls, artifactIds, costCredits, id);
+  await q(`UPDATE messages SET content=$1,"toolCalls"=$2,"artifactIds"=$3,"costCredits"=$4 WHERE id=$5`,
+    [content, toolCalls, artifactIds, costCredits, id]);
 }
 
 // ARTIFACTS
-export function createArtifact(a: Omit<Artifact,"id"|"createdAt">): Artifact {
+export async function createArtifact(a: Omit<Artifact,"id"|"createdAt">): Promise<Artifact> {
   const id = uid("art"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO artifacts (id,threadId,messageId,type,title,body,createdAt) VALUES (?,?,?,?,?,?,?)")
-    .run(id, a.threadId, a.messageId, a.type, a.title, a.body, createdAt);
+  await q(`INSERT INTO artifacts (id,"threadId","messageId",type,title,body,"createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [id, a.threadId, a.messageId, a.type, a.title, a.body, createdAt]);
   return { ...a, id, createdAt };
 }
-export function getArtifact(id: string): Artifact | null {
-  return getDb().prepare("SELECT * FROM artifacts WHERE id=?").get(id) as any || null;
+export async function getArtifact(id: string): Promise<Artifact | null> {
+  return qOne(`SELECT * FROM artifacts WHERE id=$1`, [id]);
 }
-export function listArtifactsForUser(userId: string): Artifact[] {
-  return getDb().prepare(`SELECT a.* FROM artifacts a JOIN threads t ON t.id=a.threadId WHERE t.userId=? ORDER BY a.createdAt DESC`).all(userId) as Artifact[];
+export async function listArtifactsForUser(userId: string): Promise<Artifact[]> {
+  return q(`SELECT a.* FROM artifacts a JOIN threads t ON t.id=a."threadId" WHERE t."userId"=$1 ORDER BY a."createdAt" DESC`, [userId]);
 }
 
 // AGENTS
-export function listAgents(userId: string): Agent[] {
-  const rows = getDb().prepare("SELECT * FROM agents WHERE userId=? ORDER BY createdAt").all(userId) as any[];
+export async function listAgents(userId: string): Promise<Agent[]> {
+  const rows = await q<any>(`SELECT * FROM agents WHERE "userId"=$1 ORDER BY "createdAt"`, [userId]);
   return rows.map(r => ({ ...r, tools: JSON.parse(r.tools), connectorIds: JSON.parse(r.connectorIds || "[]") }));
 }
-export function getAgent(id: string, userId: string): Agent | null {
-  const row = getDb().prepare("SELECT * FROM agents WHERE id=? AND userId=?").get(id, userId) as any;
+export async function getAgent(id: string, userId: string): Promise<Agent | null> {
+  const row = await qOne<any>(`SELECT * FROM agents WHERE id=$1 AND "userId"=$2`, [id, userId]);
   if (!row) return null;
   return { ...row, tools: JSON.parse(row.tools), connectorIds: JSON.parse(row.connectorIds || "[]") };
 }
-export function createAgent(a: Omit<Agent,"id"|"createdAt">): Agent {
+export async function createAgent(a: Omit<Agent,"id"|"createdAt">): Promise<Agent> {
   const id = uid("a"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO agents (id,userId,projectId,name,icon,color,description,systemPrompt,tools,connectorIds,routerHint,createdAt) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-    .run(id, a.userId, a.projectId, a.name, a.icon, a.color, a.description, a.systemPrompt,
-      JSON.stringify(a.tools), JSON.stringify(a.connectorIds), a.routerHint, createdAt);
+  await q(`INSERT INTO agents (id,"userId","projectId",name,icon,color,description,"systemPrompt",tools,"connectorIds","routerHint","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [id, a.userId, a.projectId, a.name, a.icon, a.color, a.description, a.systemPrompt,
+     JSON.stringify(a.tools), JSON.stringify(a.connectorIds), a.routerHint, createdAt]);
   return { ...a, id, createdAt };
 }
-export function updateAgent(id: string, userId: string, fields: Partial<Omit<Agent,"id"|"userId"|"createdAt">>) {
-  const cur = getAgent(id, userId); if (!cur) return;
+export async function updateAgent(id: string, userId: string, fields: Partial<Omit<Agent,"id"|"userId"|"createdAt">>) {
+  const cur = await getAgent(id, userId); if (!cur) return;
   const n = { ...cur, ...fields };
-  getDb().prepare("UPDATE agents SET projectId=?,name=?,icon=?,color=?,description=?,systemPrompt=?,tools=?,connectorIds=?,routerHint=? WHERE id=? AND userId=?")
-    .run(n.projectId, n.name, n.icon, n.color, n.description, n.systemPrompt,
-      JSON.stringify(n.tools), JSON.stringify(n.connectorIds), n.routerHint, id, userId);
+  await q(`UPDATE agents SET "projectId"=$1,name=$2,icon=$3,color=$4,description=$5,"systemPrompt"=$6,tools=$7,"connectorIds"=$8,"routerHint"=$9 WHERE id=$10 AND "userId"=$11`,
+    [n.projectId, n.name, n.icon, n.color, n.description, n.systemPrompt,
+     JSON.stringify(n.tools), JSON.stringify(n.connectorIds), n.routerHint, id, userId]);
 }
-export function deleteAgent(id: string, userId: string) {
-  getDb().prepare("DELETE FROM agents WHERE id=? AND userId=?").run(id, userId);
+export async function deleteAgent(id: string, userId: string) {
+  await q(`DELETE FROM agents WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
 
 // MEMORIES
-export function listMemories(userId: string, opts: { agentId?: string | null; projectId?: string | null } = {}): Memory[] {
-  const conds: string[] = ["userId=?"]; const vals: any[] = [userId];
-  if (opts.agentId !== undefined) { conds.push("(agentId IS ? OR agentId IS NULL)"); vals.push(opts.agentId); }
-  if (opts.projectId !== undefined) { conds.push("(projectId IS ? OR projectId IS NULL)"); vals.push(opts.projectId); }
-  return getDb().prepare(`SELECT * FROM memories WHERE ${conds.join(" AND ")} ORDER BY importance DESC, createdAt DESC`).all(...vals) as Memory[];
+export async function listMemories(userId: string, opts: { agentId?: string | null; projectId?: string | null } = {}): Promise<Memory[]> {
+  const conds: string[] = ['"userId"=$1']; const vals: any[] = [userId];
+  if (opts.agentId !== undefined) { vals.push(opts.agentId); conds.push(`("agentId" IS NOT DISTINCT FROM $${vals.length} OR "agentId" IS NULL)`); }
+  if (opts.projectId !== undefined) { vals.push(opts.projectId); conds.push(`("projectId" IS NOT DISTINCT FROM $${vals.length} OR "projectId" IS NULL)`); }
+  return q(`SELECT * FROM memories WHERE ${conds.join(" AND ")} ORDER BY importance DESC, "createdAt" DESC`, vals);
 }
-export function createMemory(m: Omit<Memory,"id"|"createdAt">): Memory {
+export async function createMemory(m: Omit<Memory,"id"|"createdAt">): Promise<Memory> {
   const id = uid("mem"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO memories (id,userId,agentId,projectId,content,importance,createdAt) VALUES (?,?,?,?,?,?,?)")
-    .run(id, m.userId, m.agentId, m.projectId, m.content, m.importance, createdAt);
+  await q(`INSERT INTO memories (id,"userId","agentId","projectId",content,importance,"createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [id, m.userId, m.agentId, m.projectId, m.content, m.importance, createdAt]);
   return { ...m, id, createdAt };
 }
-export function deleteMemory(id: string, userId: string) {
-  getDb().prepare("DELETE FROM memories WHERE id=? AND userId=?").run(id, userId);
+export async function deleteMemory(id: string, userId: string) {
+  await q(`DELETE FROM memories WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
 
 // CONNECTOR CREDENTIALS
-export function listConnectorCredentials(userId: string): ConnectorCredential[] {
-  const rows = getDb().prepare("SELECT * FROM connector_credentials WHERE userId=?").all(userId) as any[];
+export async function listConnectorCredentials(userId: string): Promise<ConnectorCredential[]> {
+  const rows = await q<any>(`SELECT * FROM connector_credentials WHERE "userId"=$1`, [userId]);
   return rows.map(r => ({ ...r, credentials: JSON.parse(r.credentials) }));
 }
-export function getConnectorCredentialsForId(userId: string, connectorId: string): ConnectorCredential | null {
-  const row = getDb().prepare("SELECT * FROM connector_credentials WHERE userId=? AND connectorId=? LIMIT 1").get(userId, connectorId) as any;
+export async function getConnectorCredentialsForId(userId: string, connectorId: string): Promise<ConnectorCredential | null> {
+  const row = await qOne<any>(`SELECT * FROM connector_credentials WHERE "userId"=$1 AND "connectorId"=$2 LIMIT 1`, [userId, connectorId]);
   if (!row) return null;
   return { ...row, credentials: JSON.parse(row.credentials) };
 }
-export function upsertConnectorCredentials(userId: string, connectorId: string, label: string, credentials: Record<string,string>): ConnectorCredential {
-  const existing = getConnectorCredentialsForId(userId, connectorId);
+export async function upsertConnectorCredentials(userId: string, connectorId: string, label: string, credentials: Record<string,string>): Promise<ConnectorCredential> {
+  const existing = await getConnectorCredentialsForId(userId, connectorId);
   if (existing) {
-    getDb().prepare("UPDATE connector_credentials SET label=?,credentials=? WHERE id=?").run(label, JSON.stringify(credentials), existing.id);
+    await q(`UPDATE connector_credentials SET label=$1,credentials=$2 WHERE id=$3`, [label, JSON.stringify(credentials), existing.id]);
     return { ...existing, label, credentials };
   }
   const id = uid("cc"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO connector_credentials (id,userId,connectorId,label,credentials,createdAt) VALUES (?,?,?,?,?,?)")
-    .run(id, userId, connectorId, label, JSON.stringify(credentials), createdAt);
+  await q(`INSERT INTO connector_credentials (id,"userId","connectorId",label,credentials,"createdAt") VALUES ($1,$2,$3,$4,$5,$6)`,
+    [id, userId, connectorId, label, JSON.stringify(credentials), createdAt]);
   return { id, userId, connectorId, label, credentials, createdAt };
 }
-export function deleteConnectorCredentials(userId: string, connectorId: string) {
-  getDb().prepare("DELETE FROM connector_credentials WHERE userId=? AND connectorId=?").run(userId, connectorId);
+export async function deleteConnectorCredentials(userId: string, connectorId: string) {
+  await q(`DELETE FROM connector_credentials WHERE "userId"=$1 AND "connectorId"=$2`, [userId, connectorId]);
 }
 
 // SKILLS
-export function listSkillTemplates(): Skill[] {
-  const rows = getDb().prepare("SELECT * FROM skills WHERE isTemplate=1 ORDER BY category, name").all() as any[];
+export async function listSkillTemplates(): Promise<Skill[]> {
+  const rows = await q<any>(`SELECT * FROM skills WHERE "isTemplate"=1 ORDER BY category, name`);
   return rows.map(r => ({ ...r, toolHints: JSON.parse(r.toolHints) }));
 }
-export function listUserSkills(userId: string): Skill[] {
-  const rows = getDb().prepare("SELECT * FROM skills WHERE userId=? ORDER BY createdAt DESC").all(userId) as any[];
+export async function listUserSkills(userId: string): Promise<Skill[]> {
+  const rows = await q<any>(`SELECT * FROM skills WHERE "userId"=$1 ORDER BY "createdAt" DESC`, [userId]);
   return rows.map(r => ({ ...r, toolHints: JSON.parse(r.toolHints) }));
 }
-export function getSkill(id: string): Skill | null {
-  const row = getDb().prepare("SELECT * FROM skills WHERE id=?").get(id) as any;
+export async function getSkill(id: string): Promise<Skill | null> {
+  const row = await qOne<any>(`SELECT * FROM skills WHERE id=$1`, [id]);
   if (!row) return null;
   return { ...row, toolHints: JSON.parse(row.toolHints) };
 }
-export function installSkillFromTemplate(userId: string, templateId: string): Skill | null {
-  const tpl = getSkill(templateId);
+export async function installSkillFromTemplate(userId: string, templateId: string): Promise<Skill | null> {
+  const tpl = await getSkill(templateId);
   if (!tpl || !tpl.isTemplate) return null;
   const id = uid("sk"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO skills (id,userId,name,description,category,systemPromptAddition,toolHints,isTemplate,installedFromTemplate,createdAt) VALUES (?,?,?,?,?,?,?,?,?,?)")
-    .run(id, userId, tpl.name, tpl.description, tpl.category, tpl.systemPromptAddition,
-      JSON.stringify(tpl.toolHints), 0, templateId, createdAt);
+  await q(`INSERT INTO skills (id,"userId",name,description,category,"systemPromptAddition","toolHints","isTemplate","installedFromTemplate","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [id, userId, tpl.name, tpl.description, tpl.category, tpl.systemPromptAddition,
+     JSON.stringify(tpl.toolHints), 0, templateId, createdAt]);
   return { ...tpl, id, userId, isTemplate: 0, installedFromTemplate: templateId, createdAt };
 }
-export function createSkill(s: Omit<Skill,"id"|"createdAt">): Skill {
+export async function createSkill(s: Omit<Skill,"id"|"createdAt">): Promise<Skill> {
   const id = uid("sk"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO skills (id,userId,name,description,category,systemPromptAddition,toolHints,isTemplate,installedFromTemplate,createdAt) VALUES (?,?,?,?,?,?,?,?,?,?)")
-    .run(id, s.userId, s.name, s.description, s.category, s.systemPromptAddition,
-      JSON.stringify(s.toolHints), s.isTemplate, s.installedFromTemplate, createdAt);
+  await q(`INSERT INTO skills (id,"userId",name,description,category,"systemPromptAddition","toolHints","isTemplate","installedFromTemplate","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [id, s.userId, s.name, s.description, s.category, s.systemPromptAddition,
+     JSON.stringify(s.toolHints), s.isTemplate, s.installedFromTemplate, createdAt]);
   return { ...s, id, createdAt };
 }
-export function deleteSkill(id: string, userId: string) {
-  getDb().prepare("DELETE FROM skills WHERE id=? AND userId=?").run(id, userId);
+export async function deleteSkill(id: string, userId: string) {
+  await q(`DELETE FROM skills WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
 
 // CREDITS
-export function getCreditBalance(userId: string): number {
-  const r = getDb().prepare("SELECT COALESCE(SUM(amount),0) as bal FROM credit_transactions WHERE userId=?").get(userId) as any;
+export async function getCreditBalance(userId: string): Promise<number> {
+  const r = await qOne<any>(`SELECT COALESCE(SUM(amount),0)::int as bal FROM credit_transactions WHERE "userId"=$1`, [userId]);
   return r?.bal || 0;
 }
-export function listCreditTransactions(userId: string, limit = 50): CreditTransaction[] {
-  return getDb().prepare("SELECT * FROM credit_transactions WHERE userId=? ORDER BY createdAt DESC LIMIT ?").all(userId, limit) as CreditTransaction[];
+export async function listCreditTransactions(userId: string, limit = 50): Promise<CreditTransaction[]> {
+  return q(`SELECT * FROM credit_transactions WHERE "userId"=$1 ORDER BY "createdAt" DESC LIMIT $2`, [userId, limit]);
 }
-export function addCredits(userId: string, amount: number, reason: string, ref: string | null = null) {
-  const id = uid("ct");
-  getDb().prepare("INSERT INTO credit_transactions (id,userId,amount,reason,ref,createdAt) VALUES (?,?,?,?,?,?)")
-    .run(id, userId, amount, reason, ref, Date.now());
+export async function addCredits(userId: string, amount: number, reason: string, ref: string | null = null) {
+  await q(`INSERT INTO credit_transactions (id,"userId",amount,reason,ref,"createdAt") VALUES ($1,$2,$3,$4,$5,$6)`,
+    [uid("ct"), userId, amount, reason, ref, Date.now()]);
 }
 
 // SCHEDULES
-export function listSchedules(userId: string): Schedule[] {
-  return getDb().prepare("SELECT * FROM schedules WHERE userId=? ORDER BY createdAt DESC").all(userId) as Schedule[];
+export async function listSchedules(userId: string): Promise<Schedule[]> {
+  return q(`SELECT * FROM schedules WHERE "userId"=$1 ORDER BY "createdAt" DESC`, [userId]);
 }
-export function listAllActiveSchedules(): Schedule[] {
-  return getDb().prepare("SELECT * FROM schedules WHERE active=1").all() as Schedule[];
+export async function listAllActiveSchedules(): Promise<Schedule[]> {
+  return q(`SELECT * FROM schedules WHERE active=1`);
 }
-export function getSchedule(id: string): Schedule | null {
-  return getDb().prepare("SELECT * FROM schedules WHERE id=?").get(id) as any || null;
+export async function getSchedule(id: string): Promise<Schedule | null> {
+  return qOne(`SELECT * FROM schedules WHERE id=$1`, [id]);
 }
-export function createSchedule(s: Omit<Schedule,"id"|"createdAt"|"lastRunAt">): Schedule {
+export async function createSchedule(s: Omit<Schedule,"id"|"createdAt"|"lastRunAt">): Promise<Schedule> {
   const id = uid("sch"); const createdAt = Date.now();
-  getDb().prepare("INSERT INTO schedules (id,userId,agentId,name,prompt,intervalMinutes,active,lastRunAt,createdAt) VALUES (?,?,?,?,?,?,?,?,?)")
-    .run(id, s.userId, s.agentId, s.name, s.prompt, s.intervalMinutes, s.active, null, createdAt);
+  await q(`INSERT INTO schedules (id,"userId","agentId",name,prompt,"intervalMinutes",active,"lastRunAt","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    [id, s.userId, s.agentId, s.name, s.prompt, s.intervalMinutes, s.active, null, createdAt]);
   return { ...s, id, createdAt, lastRunAt: null };
 }
-export function updateSchedule(id: string, fields: Partial<Schedule>) {
-  if (fields.active !== undefined) getDb().prepare("UPDATE schedules SET active=? WHERE id=?").run(fields.active, id);
-  if (fields.lastRunAt !== undefined) getDb().prepare("UPDATE schedules SET lastRunAt=? WHERE id=?").run(fields.lastRunAt, id);
+export async function updateSchedule(id: string, fields: Partial<Schedule>) {
+  if (fields.active !== undefined) await q(`UPDATE schedules SET active=$1 WHERE id=$2`, [fields.active, id]);
+  if (fields.lastRunAt !== undefined) await q(`UPDATE schedules SET "lastRunAt"=$1 WHERE id=$2`, [fields.lastRunAt, id]);
 }
-export function deleteSchedule(id: string, userId: string) {
-  getDb().prepare("DELETE FROM schedules WHERE id=? AND userId=?").run(id, userId);
+export async function deleteSchedule(id: string, userId: string) {
+  await q(`DELETE FROM schedules WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
 
 // RUNS
-export function createRun(r: Omit<Run,"id">): Run {
+export async function createRun(r: Omit<Run,"id">): Promise<Run> {
   const id = uid("run");
-  getDb().prepare("INSERT INTO runs (id,scheduleId,threadId,status,output,startedAt,endedAt) VALUES (?,?,?,?,?,?,?)")
-    .run(id, r.scheduleId, r.threadId, r.status, r.output, r.startedAt, r.endedAt);
+  await q(`INSERT INTO runs (id,"scheduleId","threadId",status,output,"startedAt","endedAt") VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [id, r.scheduleId, r.threadId, r.status, r.output, r.startedAt, r.endedAt]);
   return { ...r, id };
 }
-export function updateRun(id: string, fields: Partial<Run>) {
+export async function updateRun(id: string, fields: Partial<Run>) {
   const sets: string[] = []; const vals: any[] = [];
-  for (const [k,v] of Object.entries(fields)) { sets.push(`${k}=?`); vals.push(v); }
+  for (const [k,v] of Object.entries(fields)) { vals.push(v); sets.push(`"${k}"=$${vals.length}`); }
   if (!sets.length) return;
   vals.push(id);
-  getDb().prepare(`UPDATE runs SET ${sets.join(",")} WHERE id=?`).run(...vals);
+  await q(`UPDATE runs SET ${sets.join(",")} WHERE id=$${vals.length}`, vals);
 }
-export function listRuns(userId: string, limit = 50): Run[] {
-  return getDb().prepare(`SELECT r.* FROM runs r JOIN schedules s ON s.id=r.scheduleId WHERE s.userId=? ORDER BY r.startedAt DESC LIMIT ?`).all(userId, limit) as Run[];
+export async function listRuns(userId: string, limit = 50): Promise<Run[]> {
+  return q(`SELECT r.* FROM runs r JOIN schedules s ON s.id=r."scheduleId" WHERE s."userId"=$1 ORDER BY r."startedAt" DESC LIMIT $2`, [userId, limit]);
 }

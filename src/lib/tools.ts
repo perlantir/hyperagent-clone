@@ -78,7 +78,7 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
     },
     async execute(args, ctx) {
       const { createArtifact } = await import("./db");
-      const a = createArtifact({
+      const a = await createArtifact({
         threadId: ctx.threadId, messageId: ctx.messageId,
         type: args.type, title: args.title, body: args.body,
       });
@@ -105,7 +105,7 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
 async function makeConnectorTool(toolName: string, connectorId: string, userId: string): Promise<ToolDef | null> {
   const conn = CONNECTORS[connectorId];
   if (!conn) return null;
-  const creds = getConnectorCredentialsForId(userId, connectorId);
+  const creds = await getConnectorCredentialsForId(userId, connectorId);
   if (!creds) return null;
   // Each tool has its own implementation. We define a generic stub for now;
   // in a real build each maps to the connector's actual API.

@@ -5,5 +5,5 @@ import { listArtifactsForUser } from "@/lib/db";
 export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  return NextResponse.json({ artifacts: listArtifactsForUser(user.id) });
+  return NextResponse.json({ artifacts: await listArtifactsForUser(user.id) });
 }

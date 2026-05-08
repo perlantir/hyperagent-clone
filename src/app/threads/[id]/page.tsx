@@ -8,7 +8,7 @@ import { ChatView } from "@/components/ChatView";
 export default async function ThreadPage({ params }: { params: { id: string } }) {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
-  const thread = getThread(params.id, user.id);
+  const thread = await getThread(params.id, user.id);
   if (!thread) redirect("/");
   return (
     <AppShell>
