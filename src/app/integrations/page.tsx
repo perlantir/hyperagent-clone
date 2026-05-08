@@ -1,81 +1,137 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 
 export default function IntegrationsPage() {
   const [connectors, setConnectors] = useState<any[]>([]);
-  const [open, setOpen] = useState<any | null>(null);
-  const [creds, setCreds] = useState<Record<string, string>>({});
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("connected");
+  const [search, setSearch] = useState("");
+  const [connecting, setConnecting] = useState<string | null>(null);
+  const sp = useSearchParams();
 
   async function reload() {
+    setLoading(true);
     const r = await (await fetch("/api/connectors")).json();
     setConnectors(r.connectors || []);
+    setLoading(false);
   }
   useEffect(() => { reload(); }, []);
+  // After OAuth callback, ?connected=slug is appended. Refresh to pick it up.
+  useEffect(() => { if (sp?.get("connected")) reload(); }, [sp]);
 
-  async function connect() {
-    const r = await fetch(`/api/connectors/${open.id}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ credentials: creds }) });
-    if (r.ok) { setOpen(null); setCreds({}); reload(); }
+  async function connect(slug: string) {
+    setConnecting(slug);
+    try {
+      const r = await fetch(`/api/connectors/${slug}`, { method: "POST" });
+      const j = await r.json();
+      if (j.redirectUrl) {
+        // Open Composio's hosted OAuth flow
+        window.open(j.redirectUrl, "_blank", "width=540,height=720,popup");
+        // Poll for connection completion
+        const poll = window.setInterval(async () => {
+          const re = await (await fetch("/api/connectors")).json();
+          const c = (re.connectors || []).find((x: any) => x.slug === slug);
+          if (c?.connected) {
+            clearInterval(poll);
+            setConnectors(re.connectors);
+            setConnecting(null);
+          }
+        }, 2000);
+        // Stop polling after 5 minutes
+        setTimeout(() => { clearInterval(poll); setConnecting(null); }, 5 * 60 * 1000);
+      } else {
+        setConnecting(null);
+        alert("Connect flow returned no redirect URL: " + JSON.stringify(j));
+      }
+    } catch (e: any) {
+      setConnecting(null);
+      alert("Connect failed: " + e.message);
+    }
   }
-  async function disconnect(id: string) {
-    await fetch(`/api/connectors/${id}`, { method: "DELETE" });
+
+  async function disconnect(slug: string) {
+    await fetch(`/api/connectors/${slug}`, { method: "DELETE" });
     reload();
   }
+
+  const filtered = connectors.filter(c => {
+    if (filter === "connected" && !c.connected) return false;
+    if (search && !c.name.toLowerCase().includes(search.toLowerCase()) && !c.slug.includes(search.toLowerCase())) return false;
+    return true;
+  });
 
   return (
     <AppShell>
       <Topbar title="Integrations" />
       <div style={{ overflowY: "auto", padding: "32px 48px" }}>
-        <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
           <h1 className="h-display" style={{ fontSize: 44, marginBottom: 8 }}>Integrations</h1>
-          <div style={{ color: "var(--text-muted)", fontSize: 15, marginBottom: 24, maxWidth: 580 }}>Connect Hyperagent to the tools where your work already lives. Each connector exposes its API as tools your agents can call.</div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px,1fr))", gap: 12 }}>
-            {connectors.map(c => (
-              <div key={c.id} className="card" style={{ padding: 16, display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ width: 40, height: 40, borderRadius: 9, background: c.color, color: c.textColor, display: "grid", placeItems: "center", fontSize: 18, fontWeight: 700, flexShrink: 0 }}>{c.icon}</div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>{c.name}</div>
-                  <div style={{ fontSize: 11.5, color: c.connected ? "var(--green)" : "var(--text-muted)" }}>{c.connected ? "● Connected" : c.category}</div>
-                </div>
-                {c.connected ? (
-                  <button className="btn" onClick={() => disconnect(c.id)}>Disconnect</button>
-                ) : (
-                  <button className="btn btn-primary" onClick={() => { setOpen(c); setCreds({}); }}>Connect</button>
-                )}
-              </div>
-            ))}
+          <div style={{ color: "var(--text-muted)", fontSize: 15, marginBottom: 24, maxWidth: 640 }}>
+            Connect Hyperagent to the tools where your work lives. OAuth-managed by Composio — paste no tokens, your agents get the right permissions automatically.
           </div>
-        </div>
-      </div>
 
-      {open && (
-        <div onClick={() => setOpen(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "grid", placeItems: "center", zIndex: 100, backdropFilter: "blur(4px)" }}>
-          <div onClick={e => e.stopPropagation()} className="card" style={{ width: 460, padding: 24 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
-              <div style={{ width: 32, height: 32, borderRadius: 8, background: open.color, color: open.textColor, display: "grid", placeItems: "center", fontWeight: 700, fontSize: 14 }}>{open.icon}</div>
-              <div>
-                <div style={{ fontSize: 16, fontWeight: 600 }}>Connect {open.name}</div>
-                <div style={{ fontSize: 12, color: "var(--text-muted)" }}>{open.description}</div>
-              </div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 24, alignItems: "center", flexWrap: "wrap" }}>
+            <button className={`chip ${filter === "connected" ? "active" : ""}`} onClick={() => setFilter("connected")}>
+              Connected · {connectors.filter(c => c.connected).length}
+            </button>
+            <button className={`chip ${filter === "all" ? "active" : ""}`} onClick={() => setFilter("all")}>
+              All · {connectors.length}
+            </button>
+            <input
+              className="input"
+              placeholder="Search 500+ apps…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              style={{ flex: 1, maxWidth: 320, padding: "7px 12px", fontSize: 13.5 }}
+            />
+          </div>
+
+          {loading ? (
+            <div style={{ padding: 64, textAlign: "center", color: "var(--text-faint)" }}>Loading toolkits from Composio…</div>
+          ) : filtered.length === 0 ? (
+            <div style={{ padding: 64, textAlign: "center", color: "var(--text-faint)" }}>
+              {filter === "connected" ? "Nothing connected yet. Switch to All and pick a service." : "No matches."}
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-              {open.credentialFields.map((f: any) => (
-                <div key={f.name}>
-                  <label className="h-section">{f.label}</label>
-                  <input className="input" type={f.type === "password" ? "password" : "text"} value={creds[f.name] || ""} onChange={e => setCreds({ ...creds, [f.name]: e.target.value })} style={{ marginTop: 6 }} />
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px,1fr))", gap: 12 }}>
+              {filtered.map(c => (
+                <div key={c.slug} className="card" style={{ padding: 16, display: "flex", alignItems: "center", gap: 12 }}>
+                  <div style={{
+                    width: 40, height: 40, borderRadius: 9,
+                    background: "var(--bg-subtle)",
+                    display: "grid", placeItems: "center",
+                    fontSize: 18, fontWeight: 700,
+                    overflow: "hidden",
+                    flexShrink: 0,
+                  }}>
+                    {c.logo ? (
+                      <img src={c.logo} alt={c.name} style={{ width: 28, height: 28, objectFit: "contain" }} />
+                    ) : (
+                      (c.name?.[0] || "?").toUpperCase()
+                    )}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
+                    <div style={{ fontSize: 11.5, color: c.connected ? "var(--green)" : "var(--text-muted)" }}>
+                      {c.connected ? "● Connected" : (c.categories?.[0] || "Available")}
+                    </div>
+                  </div>
+                  {c.connected ? (
+                    <button className="btn" onClick={() => disconnect(c.slug)}>Disconnect</button>
+                  ) : (
+                    <button className="btn btn-primary" disabled={connecting === c.slug} onClick={() => connect(c.slug)}>
+                      {connecting === c.slug ? "Waiting…" : "Connect"}
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
-            <div style={{ marginTop: 16, fontSize: 12, color: "var(--text-faint)" }}>Tools added: {open.tools.join(", ")}</div>
-            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
-              <button className="btn" onClick={() => setOpen(null)}>Cancel</button>
-              <button className="btn btn-primary" onClick={connect}>Connect</button>
-            </div>
-          </div>
+          )}
         </div>
-      )}
+      </div>
     </AppShell>
   );
 }

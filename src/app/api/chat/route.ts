@@ -12,7 +12,7 @@ import {
   getAgent, listAgents,
 } from "@/lib/db";
 import { client, DEFAULT_MODEL } from "@/lib/llm";
-import { resolveTools, toolDefsForAnthropic, executeTool, ToolCtx } from "@/lib/tools";
+import { resolveAllTools, executeAnyTool, ToolCtx } from "@/lib/tools";
 import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
 import { routeMessage } from "@/lib/router";
 import { balance, chargeCredits, computeCost } from "@/lib/credits";
@@ -68,7 +68,7 @@ export async function POST(req: Request) {
 
   // Resolve tools.
   const toolNames = agent?.tools?.length ? agent.tools : ["web_search", "generate_artifact"];
-  const tools = await resolveTools(toolNames, user.id);
+  const { tools, composioToolNames, builtinTools } = await resolveAllTools(user.id, toolNames);
 
   // Build the conversation history for Anthropic.
   const allMsgs = await listMessages(threadId);
@@ -107,7 +107,7 @@ export async function POST(req: Request) {
             max_tokens: 2048,
             system: systemPrompt,
             messages,
-            tools: toolDefsForAnthropic(tools) as any,
+            tools: tools as any,
           });
 
           // Collect tool_use blocks emitted in this turn.
@@ -159,7 +159,7 @@ export async function POST(req: Request) {
           for (const tu of turnToolUses) {
             send({ type: "tool_use", name: tu.name, input: tu.input, id: tu.id });
             const t0 = Date.now();
-            const result = await executeTool(tools, tu.name, tu.input, ctx);
+            const result = await executeAnyTool(tu.name, tu.input, ctx, composioToolNames, builtinTools);
             const dt = Date.now() - t0;
             send({ type: "tool_result", id: tu.id, result, durationMs: dt });
             toolCallsPersisted.push({ name: tu.name, args: tu.input, result, durationMs: dt });

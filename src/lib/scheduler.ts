@@ -7,7 +7,7 @@ import {
   createRun, updateRun, createThread, createMessage, updateMessage,
 } from "./db";
 import { client, DEFAULT_MODEL } from "./llm";
-import { resolveTools, toolDefsForAnthropic } from "./tools";
+import { resolveAllTools } from "./tools";
 import { computeCost, chargeCredits, balance } from "./credits";
 
 export async function runDueSchedules(): Promise<{ ran: number; skipped: number; errors: number }> {
@@ -47,13 +47,13 @@ async function runSchedule(scheduleId: string) {
     await createMessage({ threadId: thread.id, role: "user", content: s.prompt });
     const assistantMsg = await createMessage({ threadId: thread.id, role: "assistant", content: "" });
 
-    const tools = await resolveTools(agent.tools, s.userId);
+    const { tools } = await resolveAllTools(s.userId, agent.tools);
     const result = await client().messages.create({
       model: DEFAULT_MODEL,
       max_tokens: 1024,
       system: agent.systemPrompt,
       messages: [{ role: "user", content: s.prompt }],
-      tools: toolDefsForAnthropic(tools) as any,
+      tools: tools as any,
     });
 
     let text = "";
