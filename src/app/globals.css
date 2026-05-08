@@ -1,0 +1,115 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root, :root[data-theme="light"] {
+  --bg: #fafaf9;
+  --bg-elev: #ffffff;
+  --bg-subtle: #f5f5f4;
+  --bg-sunken: #ebe8e3;
+  --border: #e7e5e4;
+  --border-strong: #d6d3d1;
+  --text: #1c1917;
+  --text-muted: #57534e;
+  --text-faint: #a8a29e;
+  --accent: #c2410c;
+  --accent-soft: #fed7aa;
+  --accent-bg: #fff7ed;
+  --green: #15803d;
+  --green-bg: #dcfce7;
+  --blue: #1d4ed8;
+  --blue-bg: #dbeafe;
+  --purple: #6d28d9;
+  --purple-bg: #ede9fe;
+  --shadow: 0 1px 2px rgba(28,25,23,0.04), 0 4px 12px rgba(28,25,23,0.06);
+}
+:root[data-theme="dark"] {
+  --bg: #0c0a09;
+  --bg-elev: #1c1917;
+  --bg-subtle: #18181b;
+  --bg-sunken: #0a0a0a;
+  --border: #292524;
+  --border-strong: #44403c;
+  --text: #fafaf9;
+  --text-muted: #a8a29e;
+  --text-faint: #78716c;
+  --accent: #fb923c;
+  --accent-soft: #7c2d12;
+  --accent-bg: #431407;
+  --green: #4ade80;
+  --green-bg: #052e16;
+  --blue: #60a5fa;
+  --blue-bg: #172554;
+  --purple: #a78bfa;
+  --purple-bg: #2e1065;
+  --shadow: 0 1px 2px rgba(0,0,0,0.4), 0 4px 12px rgba(0,0,0,0.4);
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-feature-settings: 'cv11','ss01';
+  -webkit-font-smoothing: antialiased;
+}
+.serif { font-family: 'Instrument Serif', Georgia, serif; font-weight: 400; }
+.mono { font-family: 'JetBrains Mono', monospace; }
+::selection { background: var(--accent); color: white; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+button { font-family: inherit; cursor: pointer; }
+input, textarea { font-family: inherit; }
+
+.app-shell { display: grid; grid-template-columns: 256px 1fr; height: 100vh; }
+.app-shell.no-sidebar { grid-template-columns: 1fr; }
+
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 8px;
+  background: var(--bg-elev); color: var(--text);
+  border: 1px solid var(--border); font-size: 13px; font-weight: 500;
+  transition: border-color 0.15s, opacity 0.15s;
+}
+.btn:hover { border-color: var(--border-strong); }
+.btn-primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+.btn-primary:hover { opacity: 0.85; border-color: var(--text); }
+.btn-accent { background: var(--accent); color: white; border-color: var(--accent); }
+
+.input {
+  width: 100%; padding: 10px 14px;
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--bg); color: var(--text); font-size: 14px;
+  outline: none; transition: border-color 0.15s;
+}
+.input:focus { border-color: var(--accent); }
+
+.card {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg-elev); padding: 20px;
+}
+
+.badge { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 99px; font-size: 11px; font-weight: 500; gap: 4px; }
+.badge-accent { background: var(--accent-bg); color: var(--accent); }
+.badge-green { background: var(--green-bg); color: var(--green); }
+.badge-gray { background: var(--bg-subtle); color: var(--text-muted); }
+
+.chip {
+  padding: 5px 12px; border: 1px solid var(--border); border-radius: 99px;
+  font-size: 12.5px; color: var(--text-muted); background: var(--bg-elev);
+  cursor: pointer; user-select: none;
+}
+.chip:hover { border-color: var(--border-strong); }
+.chip.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+
+.h-display { font-family: 'Instrument Serif', Georgia, serif; font-weight: 400; line-height: 1.1; letter-spacing: -0.02em; }
+.h-section { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-faint); font-weight: 600; }
+
+.typing-cursor::after { content:'▌'; color: var(--accent); animation: blink 1s infinite; margin-left: 1px; }
+@keyframes blink { 0%,50%{opacity:1} 51%,100%{opacity:0} }
+
+a { color: inherit; text-decoration: none; }
