@@ -4,6 +4,7 @@
 //   3. Composio-managed tools (currently stubbed)
 
 import * as browser from "./browser";
+import * as media from "./media";
 import { getComposioTools, executeComposioTool, listConnectedAccounts } from "./composio";
 
 export interface ToolDef {
@@ -318,6 +319,74 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
       } catch (e: any) { return `download_file error: ${e.message}`; }
     },
   },
+
+  // ============ MEDIA GENERATION (P13) ============
+
+  generate_image: {
+    name: "generate_image",
+    description: "Generate a new image from a text prompt using Gemini Nano Banana. Saves as image artifact.",
+    input_schema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "What to draw. Be specific about subject, style, composition." },
+        aspectRatio: { type: "string", enum: ["1:1","16:9","9:16","4:3","3:4"], description: "Image aspect ratio" },
+      },
+      required: ["prompt"],
+    },
+    async execute(args, ctx) {
+      try {
+        const base64 = await media.generateImage(args.prompt, { aspectRatio: args.aspectRatio });
+        if (!base64) return "Image generation returned empty.";
+        const { createArtifact } = await import("./db");
+        const a = await createArtifact({
+          threadId: ctx.threadId, messageId: ctx.messageId, type: "image",
+          title: args.prompt.slice(0, 60),
+          body: `<img src="data:image/png;base64,${base64}" style="max-width:100%;display:block">`,
+        });
+        ctx.artifactsCreated.push({ id: a.id, type: a.type, title: a.title });
+        return `Image generated: artifact id=${a.id}`;
+      } catch (e: any) { return `generate_image error: ${e.message}`; }
+    },
+  },
+
+  generate_speech: {
+    name: "generate_speech",
+    description: "Convert text to speech audio (Gemini TTS). Saves as a document artifact with embedded audio player.",
+    input_schema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        voice: { type: "string", enum: ["Kore","Charon","Puck","Zephyr","Leda","Aoede"] },
+      },
+      required: ["text"],
+    },
+    async execute(args, ctx) {
+      try {
+        const base64 = await media.generateSpeech(args.text, args.voice || "Kore");
+        if (!base64) return "TTS returned empty.";
+        const { createArtifact } = await import("./db");
+        const a = await createArtifact({
+          threadId: ctx.threadId, messageId: ctx.messageId, type: "document",
+          title: `Audio: ${args.text.slice(0, 50)}…`,
+          body: `<audio controls style="width:100%"><source src="data:audio/wav;base64,${base64}" type="audio/wav"></audio>`,
+        });
+        ctx.artifactsCreated.push({ id: a.id, type: a.type, title: a.title });
+        return `Audio generated: artifact id=${a.id}`;
+      } catch (e: any) { return `generate_speech error: ${e.message}`; }
+    },
+  },
+
+  generate_video: {
+    name: "generate_video",
+    description: "Generate a short video from a text prompt using Veo. Returns an operation name to poll. Long-running (1-3 min).",
+    input_schema: { type: "object", properties: { prompt: { type: "string" } }, required: ["prompt"] },
+    async execute(args, _ctx) {
+      try {
+        const r = await media.generateVideo(args.prompt);
+        return `Video generation started. Operation: ${r.operationName}. Poll with check_video_status.`;
+      } catch (e: any) { return `generate_video error: ${e.message}`; }
+    },
+  },
 };
 
 // Anthropic-format tool spec
@@ -390,4 +459,7 @@ export const DEFAULT_AGENT_TOOLS = [
   "computer_key",
   "upload_file_to_page",
   "download_file",
+  "generate_image",
+  "generate_speech",
+  "generate_video",
 ];
