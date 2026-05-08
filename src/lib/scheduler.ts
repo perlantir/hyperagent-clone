@@ -6,7 +6,7 @@ import {
   listAllActiveSchedules, updateSchedule, getSchedule, getAgent,
   createRun, updateRun, createThread, createMessage, updateMessage,
 } from "./db";
-import { client, DEFAULT_MODEL } from "./llm";
+import { clientForUser, DEFAULT_MODEL } from "./llm";
 import { resolveAllTools } from "./tools";
 import { computeCost, chargeCredits, balance } from "./credits";
 
@@ -48,7 +48,8 @@ async function runSchedule(scheduleId: string) {
     const assistantMsg = await createMessage({ threadId: thread.id, role: "assistant", content: "" });
 
     const { tools } = await resolveAllTools(s.userId, agent.tools);
-    const result = await client().messages.create({
+    const ant = await clientForUser(s.userId);
+    const result = await ant.messages.create({
       model: DEFAULT_MODEL,
       max_tokens: 1024,
       system: agent.systemPrompt,

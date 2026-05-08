@@ -1,9 +1,13 @@
-// Multi-provider media generation.
-// Image: Gemini Nano Banana | OpenAI gpt-image-1 | Grok grok-2-image
-// Speech: Gemini TTS | OpenAI tts-1 (Grok doesn't have TTS)
-// Video: Gemini Veo | OpenAI Sora (Grok doesn't have video)
+// Multi-provider media generation, scoped to a user so per-user keys work.
 //
-// Provider is chosen per-call via opts, defaulting to user preferences.
+// Image:  Gemini Nano Banana | OpenAI gpt-image-1 | Grok grok-2-image
+// Speech: Gemini TTS | OpenAI tts-1 (Grok doesn't have TTS yet)
+// Video:  Gemini Veo | OpenAI Sora (Grok doesn't have video yet)
+//
+// All entry points take `userId` so resolveSecret() can find that user's
+// saved key, falling back to the platform env var if they haven't set one.
+
+import { resolveSecret, type SecretProvider } from "./secrets";
 
 export type ImageProvider = "gemini" | "openai" | "grok";
 export type SpeechProvider = "gemini" | "openai";
@@ -13,19 +17,15 @@ const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const OPENAI_BASE = "https://api.openai.com/v1";
 const XAI_BASE = "https://api.x.ai/v1";
 
-function geminiKey() {
-  const k = process.env.GEMINI_API_KEY;
-  if (!k) throw new Error("GEMINI_API_KEY not set. Get one at aistudio.google.com");
-  return k;
-}
-function openaiKey() {
-  const k = process.env.OPENAI_API_KEY;
-  if (!k) throw new Error("OPENAI_API_KEY not set. Get one at platform.openai.com");
-  return k;
-}
-function xaiKey() {
-  const k = process.env.XAI_API_KEY;
-  if (!k) throw new Error("XAI_API_KEY not set. Get one at x.ai/api");
+const PROVIDER_TO_SECRET: Record<string, SecretProvider> = {
+  gemini: "gemini", openai: "openai", grok: "xai",
+};
+
+async function keyFor(userId: string | null | undefined, provider: string): Promise<string> {
+  const slug = PROVIDER_TO_SECRET[provider];
+  if (!slug) throw new Error(`Unknown provider: ${provider}`);
+  const k = await resolveSecret(userId, slug);
+  if (!k) throw new Error(`No ${provider} API key. Set one in Settings → API Keys.`);
   return k;
 }
 
@@ -33,18 +33,20 @@ function xaiKey() {
 
 export async function generateImage(
   prompt: string,
-  opts: { provider?: ImageProvider; aspectRatio?: string } = {},
+  opts: { provider?: ImageProvider; aspectRatio?: string; userId?: string | null } = {},
 ): Promise<string> {
   const provider = opts.provider || "gemini";
-  if (provider === "gemini") return await geminiImage(prompt);
-  if (provider === "openai") return await openaiImage(prompt, opts.aspectRatio);
-  if (provider === "grok")   return await grokImage(prompt);
+  const userId = opts.userId || null;
+  if (provider === "gemini") return await geminiImage(prompt, userId);
+  if (provider === "openai") return await openaiImage(prompt, opts.aspectRatio, userId);
+  if (provider === "grok")   return await grokImage(prompt, userId);
   throw new Error(`Unknown image provider: ${provider}`);
 }
 
-async function geminiImage(prompt: string): Promise<string> {
+async function geminiImage(prompt: string, userId: string | null): Promise<string> {
+  const k = await keyFor(userId, "gemini");
   const r = await fetch(
-    `${GEMINI_BASE}/models/gemini-2.5-flash-image:generateContent?key=${geminiKey()}`,
+    `${GEMINI_BASE}/models/gemini-2.5-flash-image:generateContent?key=${k}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -60,12 +62,13 @@ async function geminiImage(prompt: string): Promise<string> {
   return part?.inlineData?.data || "";
 }
 
-async function openaiImage(prompt: string, aspectRatio?: string): Promise<string> {
+async function openaiImage(prompt: string, aspectRatio: string | undefined, userId: string | null): Promise<string> {
+  const k = await keyFor(userId, "openai");
   const sizeMap: Record<string, string> = { "1:1": "1024x1024", "16:9": "1792x1024", "9:16": "1024x1792" };
   const size = sizeMap[aspectRatio || "1:1"] || "1024x1024";
   const r = await fetch(`${OPENAI_BASE}/images/generations`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${openaiKey()}` },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
     body: JSON.stringify({ model: "gpt-image-1", prompt, n: 1, size, response_format: "b64_json" }),
   });
   if (!r.ok) throw new Error(`OpenAI image error: ${r.status} ${await r.text()}`);
@@ -73,10 +76,11 @@ async function openaiImage(prompt: string, aspectRatio?: string): Promise<string
   return j?.data?.[0]?.b64_json || "";
 }
 
-async function grokImage(prompt: string): Promise<string> {
+async function grokImage(prompt: string, userId: string | null): Promise<string> {
+  const k = await keyFor(userId, "grok");
   const r = await fetch(`${XAI_BASE}/images/generations`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${xaiKey()}` },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
     body: JSON.stringify({ model: "grok-2-image", prompt, n: 1, response_format: "b64_json" }),
   });
   if (!r.ok) throw new Error(`Grok image error: ${r.status} ${await r.text()}`);
@@ -88,17 +92,19 @@ async function grokImage(prompt: string): Promise<string> {
 
 export async function generateSpeech(
   text: string,
-  opts: { provider?: SpeechProvider; voice?: string } = {},
+  opts: { provider?: SpeechProvider; voice?: string; userId?: string | null } = {},
 ): Promise<{ base64: string; mimeType: string }> {
   const provider = opts.provider || "gemini";
-  if (provider === "gemini") return { base64: await geminiSpeech(text, opts.voice), mimeType: "audio/wav" };
-  if (provider === "openai") return { base64: await openaiSpeech(text, opts.voice), mimeType: "audio/mpeg" };
+  const userId = opts.userId || null;
+  if (provider === "gemini") return { base64: await geminiSpeech(text, opts.voice, userId), mimeType: "audio/wav" };
+  if (provider === "openai") return { base64: await openaiSpeech(text, opts.voice, userId), mimeType: "audio/mpeg" };
   throw new Error(`Unknown speech provider: ${provider}`);
 }
 
-async function geminiSpeech(text: string, voice = "Kore"): Promise<string> {
+async function geminiSpeech(text: string, voice: string | undefined, userId: string | null): Promise<string> {
+  const k = await keyFor(userId, "gemini");
   const r = await fetch(
-    `${GEMINI_BASE}/models/gemini-2.5-flash-preview-tts:generateContent?key=${geminiKey()}`,
+    `${GEMINI_BASE}/models/gemini-2.5-flash-preview-tts:generateContent?key=${k}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -106,7 +112,7 @@ async function geminiSpeech(text: string, voice = "Kore"): Promise<string> {
         contents: [{ parts: [{ text }] }],
         generationConfig: {
           responseModalities: ["AUDIO"],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice } } },
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: voice || "Kore" } } },
         },
       }),
     },
@@ -117,11 +123,12 @@ async function geminiSpeech(text: string, voice = "Kore"): Promise<string> {
   return part?.inlineData?.data || "";
 }
 
-async function openaiSpeech(text: string, voice = "alloy"): Promise<string> {
+async function openaiSpeech(text: string, voice: string | undefined, userId: string | null): Promise<string> {
+  const k = await keyFor(userId, "openai");
   const r = await fetch(`${OPENAI_BASE}/audio/speech`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${openaiKey()}` },
-    body: JSON.stringify({ model: "tts-1", input: text, voice, response_format: "mp3" }),
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
+    body: JSON.stringify({ model: "tts-1", input: text, voice: voice || "alloy", response_format: "mp3" }),
   });
   if (!r.ok) throw new Error(`OpenAI TTS error: ${r.status} ${await r.text()}`);
   const buf = Buffer.from(await r.arrayBuffer());
@@ -133,9 +140,11 @@ async function openaiSpeech(text: string, voice = "alloy"): Promise<string> {
 export async function transcribeAudio(
   audioBase64: string,
   mimeType = "audio/mpeg",
+  userId: string | null = null,
 ): Promise<string> {
-  // Use OpenAI Whisper if available, fallback to Gemini.
-  if (process.env.OPENAI_API_KEY) {
+  // Prefer OpenAI Whisper if available, otherwise Gemini multimodal.
+  const openaiKey = await resolveSecret(userId, "openai");
+  if (openaiKey) {
     try {
       const buf = Buffer.from(audioBase64, "base64");
       const fd = new FormData();
@@ -143,15 +152,15 @@ export async function transcribeAudio(
       fd.append("model", "whisper-1");
       const r = await fetch(`${OPENAI_BASE}/audio/transcriptions`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${openaiKey()}` },
+        headers: { "Authorization": `Bearer ${openaiKey}` },
         body: fd as any,
       });
       if (r.ok) { const j = await r.json(); return j.text || ""; }
     } catch {}
   }
-  // Fallback: Gemini multimodal
+  const k = await keyFor(userId, "gemini");
   const r = await fetch(
-    `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${geminiKey()}`,
+    `${GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key=${k}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -172,17 +181,19 @@ export async function transcribeAudio(
 
 export async function generateVideo(
   prompt: string,
-  opts: { provider?: VideoProvider } = {},
+  opts: { provider?: VideoProvider; userId?: string | null } = {},
 ): Promise<{ operationName: string; provider: VideoProvider }> {
   const provider = opts.provider || "gemini";
-  if (provider === "gemini") return { operationName: await geminiVideo(prompt), provider };
-  if (provider === "openai") return { operationName: await openaiVideo(prompt), provider };
+  const userId = opts.userId || null;
+  if (provider === "gemini") return { operationName: await geminiVideo(prompt, userId), provider };
+  if (provider === "openai") return { operationName: await openaiVideo(prompt, userId), provider };
   throw new Error(`Unknown video provider: ${provider}`);
 }
 
-async function geminiVideo(prompt: string): Promise<string> {
+async function geminiVideo(prompt: string, userId: string | null): Promise<string> {
+  const k = await keyFor(userId, "gemini");
   const r = await fetch(
-    `${GEMINI_BASE}/models/veo-2.0-generate-001:predictLongRunning?key=${geminiKey()}`,
+    `${GEMINI_BASE}/models/veo-2.0-generate-001:predictLongRunning?key=${k}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -197,11 +208,11 @@ async function geminiVideo(prompt: string): Promise<string> {
   return j.name || "";
 }
 
-async function openaiVideo(prompt: string): Promise<string> {
-  // OpenAI Sora video API. Async — returns a job that we poll.
+async function openaiVideo(prompt: string, userId: string | null): Promise<string> {
+  const k = await keyFor(userId, "openai");
   const r = await fetch(`${OPENAI_BASE}/videos`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${openaiKey()}` },
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${k}` },
     body: JSON.stringify({ model: "sora-2", prompt, seconds: "8", size: "1280x720" }),
   });
   if (!r.ok) throw new Error(`Sora error: ${r.status} ${await r.text()}`);

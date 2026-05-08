@@ -7,7 +7,7 @@
 import { NextResponse } from "next/server";
 import crypto from "node:crypto";
 import { pool, createMessage, createThread, getAgent, updateMessage } from "@/lib/db";
-import { client as anthropicClient, DEFAULT_MODEL } from "@/lib/llm";
+import { clientForUser, DEFAULT_MODEL } from "@/lib/llm";
 import { resolveAllTools } from "@/lib/tools";
 import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
 import { computeCost, chargeCredits, balance } from "@/lib/credits";
@@ -66,7 +66,8 @@ export async function POST(req: Request) {
   const toolNames = agent?.tools || ["web_search", "generate_artifact"];
   const { tools } = await resolveAllTools(userId, toolNames);
 
-  const result = await anthropicClient().messages.create({
+  const ant = await clientForUser(userId);
+  const result = await ant.messages.create({
     model: DEFAULT_MODEL,
     max_tokens: 2048,
     system,

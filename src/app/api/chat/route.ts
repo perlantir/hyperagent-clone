@@ -11,7 +11,7 @@ import {
   getThread, listMessages, createMessage, updateMessage, updateThread,
   getAgent, listAgents,
 } from "@/lib/db";
-import { client, DEFAULT_MODEL } from "@/lib/llm";
+import { clientForUser, DEFAULT_MODEL } from "@/lib/llm";
 import { resolveAllTools, executeAnyTool, ToolCtx } from "@/lib/tools";
 import { memoriesForContext, memoriesAsSystemBlock } from "@/lib/memory";
 import { routeMessage } from "@/lib/router";
@@ -47,7 +47,7 @@ export async function POST(req: Request) {
   if (useRouter && !agentId) {
     const agents = (await listAgents(user.id)).filter(a => a.name.toLowerCase() !== "router");
     try {
-      const decision = await routeMessage(content, agents);
+      const decision = await routeMessage(content, agents, user.id);
       agentId = decision.agentId;
       routerNote = decision;
       await updateThread(threadId, user.id, { agentId });
@@ -97,8 +97,9 @@ export async function POST(req: Request) {
 
         // Iterative tool-calling loop. Each iteration may produce text + zero or more tool_use blocks.
         let messages = anthropicMessages.slice();
+        const ant = await clientForUser(user.id);
         for (let iter = 0; iter < 6; iter++) {
-          const stream2 = client().messages.stream({
+          const stream2 = ant.messages.stream({
             model: DEFAULT_MODEL,
             max_tokens: 2048,
             system: systemPrompt,

@@ -3,6 +3,71 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 
+function KeyRow({ provider, status, onSave, onDelete }: {
+  provider: { id: string; label: string; description: string; placeholder: string; helpUrl: string };
+  status: "user" | "platform" | "missing";
+  onSave: (v: string) => void;
+  onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const badge = status === "user"
+    ? { text: "Your key", color: "var(--green)", bg: "rgba(34,197,94,0.1)" }
+    : status === "platform"
+      ? { text: "Platform default", color: "var(--text-muted)", bg: "var(--bg-elevated)" }
+      : { text: "Not configured", color: "#dc2626", bg: "rgba(220,38,38,0.08)" };
+  return (
+    <div className="card" style={{ padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>{provider.label}</div>
+            <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 8px", borderRadius: 99, color: badge.color, background: badge.bg }}>
+              {badge.text}
+            </span>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3 }}>{provider.description}</div>
+          <a href={provider.helpUrl} target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 11.5, color: "var(--accent)", textDecoration: "none" }}>
+            Get a key →
+          </a>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {status === "user" && !editing && (
+            <button className="btn" onClick={onDelete} style={{ fontSize: 12, padding: "6px 12px" }}>Remove</button>
+          )}
+          {!editing && (
+            <button className="btn btn-primary" onClick={() => setEditing(true)} style={{ fontSize: 12, padding: "6px 12px" }}>
+              {status === "user" ? "Replace" : "Set key"}
+            </button>
+          )}
+        </div>
+      </div>
+      {editing && (
+        <div style={{ marginTop: 12, display: "flex", gap: 6 }}>
+          <input
+            type="password" autoFocus
+            placeholder={provider.placeholder}
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            onKeyDown={e => { if (e.key === "Escape") { setEditing(false); setValue(""); } }}
+            style={{
+              flex: 1, padding: "8px 10px", borderRadius: 6,
+              border: "1px solid var(--border)", background: "var(--bg)",
+              color: "var(--text)", fontSize: 13, fontFamily: "monospace",
+            }}
+          />
+          <button className="btn btn-primary"
+            onClick={() => { if (value.trim().length >= 4) { onSave(value.trim()); setEditing(false); setValue(""); } }}
+            style={{ fontSize: 12, padding: "8px 14px" }}>Save</button>
+          <button className="btn" onClick={() => { setEditing(false); setValue(""); }}
+            style={{ fontSize: 12, padding: "8px 12px" }}>Cancel</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   const [me, setMe] = useState<any>(null);
   const [prefs, setPrefs] = useState<any>({});
@@ -10,6 +75,8 @@ export default function SettingsPage() {
   const [provider, setProvider] = useState("anthropic");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [secretProviders, setSecretProviders] = useState<any[]>([]);
+  const [secretStatus, setSecretStatus] = useState<Record<string, "user" | "platform" | "missing">>({});
 
   async function reload() {
     const meR = await (await fetch("/api/auth/me")).json();
@@ -19,8 +86,25 @@ export default function SettingsPage() {
     setModels(r.models || []);
     const cur = (r.models || []).find((m: any) => m.id === r.preferences?.modelId);
     if (cur) setProvider(cur.provider);
+    const s = await (await fetch("/api/settings/secrets")).json();
+    setSecretProviders(s.providers || []);
+    setSecretStatus(s.secrets || {});
   }
   useEffect(() => { reload(); }, []);
+
+  async function saveSecret(providerId: string, value: string) {
+    const r = await fetch("/api/settings/secrets", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: providerId, value }),
+    });
+    if (r.ok) reload();
+    else alert((await r.json()).error || "Failed to save");
+  }
+  async function deleteSecret(providerId: string) {
+    if (!confirm("Remove your saved key for " + providerId + "? Calls will fall back to platform default.")) return;
+    const r = await fetch("/api/settings/secrets/" + providerId, { method: "DELETE" });
+    if (r.ok) reload();
+  }
 
   async function save(patch: Record<string, any>) {
     setSaving(true); setSaved(false);
@@ -89,6 +173,23 @@ export default function SettingsPage() {
             </div>
           </div>
 
+          {/* API Keys */}
+          <div style={{ marginBottom: 40 }}>
+            <div className="h-section" style={{ marginBottom: 12 }}>API Keys</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 16 }}>
+              Bring your own keys for any provider. Stored encrypted (AES-256-GCM) in your account.
+              Each provider falls back to the platform default if you don't set one.
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {secretProviders.map((p: any) => (
+                <KeyRow key={p.id} provider={p}
+                  status={secretStatus[p.id] || "missing"}
+                  onSave={v => saveSecret(p.id, v)}
+                  onDelete={() => deleteSecret(p.id)} />
+              ))}
+            </div>
+          </div>
+
           {/* Chat model */}
           <div style={{ marginBottom: 40 }}>
             <div className="h-section" style={{ marginBottom: 12 }}>Chat Model</div>
@@ -127,7 +228,7 @@ export default function SettingsPage() {
             <Picker title="Speech" subtitle="Used by the generate_speech tool" options={speechProviders} prefKey="speechProvider" />
             <Picker title="Video"  subtitle="Used by the generate_video tool"  options={videoProviders}  prefKey="videoProvider" />
             <div style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 4 }}>
-              Each provider needs its API key set in Vercel env vars: <code>GEMINI_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>XAI_API_KEY</code>.
+              Configure provider keys in <strong>API Keys</strong> above (or the platform falls back to its own default).
             </div>
             {saving && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>Saving…</div>}
             {saved && <div style={{ marginTop: 8, fontSize: 12, color: "var(--green)" }}>✓ Saved</div>}

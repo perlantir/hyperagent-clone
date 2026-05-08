@@ -30,6 +30,6 @@ export async function DELETE(_: Request, { params }: { params: { id: string } })
   const match = accounts.find((a: any) => (a.toolkit?.slug || a.appName || a.app_name) === params.id);
   if (!match) return NextResponse.json({ ok: true });
 
-  await deleteConnection(match.id);
+  await deleteConnection(user.id, match.id);
   return NextResponse.json({ ok: true });
 }

@@ -4,7 +4,8 @@
 // renders identically regardless of which model was picked.
 
 import Anthropic from "@anthropic-ai/sdk";
-import { getModel, type Provider } from "./models";
+import { getModel } from "./models";
+import { resolveSecret } from "./secrets";
 
 export interface UnifiedMessage { role: "user" | "assistant" | "system"; content: string; }
 
@@ -14,27 +15,25 @@ export interface StreamCallbacks {
   onDone?: (info: { inputTokens: number; outputTokens: number; toolUses: { id: string; name: string; input: any }[] }) => void;
 }
 
-let _ant: Anthropic | null = null;
-function ant() {
-  if (_ant) return _ant;
-  const k = process.env.ANTHROPIC_API_KEY;
-  if (!k) throw new Error("ANTHROPIC_API_KEY required");
-  _ant = new Anthropic({ apiKey: k });
-  return _ant;
+async function ant(userId: string | null | undefined) {
+  const k = await resolveSecret(userId, "anthropic");
+  if (!k) throw new Error("Anthropic API key not configured. Add one in Settings → API Keys.");
+  return new Anthropic({ apiKey: k });
 }
 
-function openaiKey() {
-  const k = process.env.OPENAI_API_KEY;
-  if (!k) throw new Error("OPENAI_API_KEY required for OpenAI models");
+async function openaiKey(userId: string | null | undefined) {
+  const k = await resolveSecret(userId, "openai");
+  if (!k) throw new Error("OpenAI API key not configured. Add one in Settings → API Keys.");
   return k;
 }
-function geminiKey() {
-  const k = process.env.GEMINI_API_KEY;
-  if (!k) throw new Error("GEMINI_API_KEY required for Google models");
+async function geminiKey(userId: string | null | undefined) {
+  const k = await resolveSecret(userId, "gemini");
+  if (!k) throw new Error("Gemini API key not configured. Add one in Settings → API Keys.");
   return k;
 }
 
 export async function streamChat(args: {
+  userId?: string | null;
   modelId: string;
   system: string;
   messages: UnifiedMessage[];
@@ -50,7 +49,8 @@ export async function streamChat(args: {
 
 // =========== ANTHROPIC ===========
 async function streamAnthropic(a: any) {
-  const stream = ant().messages.stream({
+  const client = await ant(a.userId);
+  const stream = client.messages.stream({
     model: a.modelId,
     max_tokens: 2048,
     system: a.system,
@@ -93,9 +93,10 @@ async function streamOpenAI(a: any) {
     { role: "system", content: a.system },
     ...a.messages.map((m: any) => ({ role: m.role, content: m.content })),
   ];
+  const oaKey = await openaiKey(a.userId);
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: { "Authorization": `Bearer ${openaiKey()}`, "Content-Type": "application/json" },
+    headers: { "Authorization": `Bearer ${oaKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: a.modelId, messages, tools, stream: true }),
   });
   if (!r.ok || !r.body) throw new Error(`OpenAI stream error: ${r.status} ${await r.text()}`);
@@ -157,7 +158,8 @@ async function streamGoogle(a: any) {
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${a.modelId}:streamGenerateContent?alt=sse&key=${geminiKey()}`;
+  const gKey = await geminiKey(a.userId);
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${a.modelId}:streamGenerateContent?alt=sse&key=${gKey}`;
   const r = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

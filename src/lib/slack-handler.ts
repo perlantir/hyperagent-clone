@@ -1,7 +1,7 @@
 // Slack inbound: thread mapping + agent run + reply post.
 
 import { pool, createThread, createMessage, getAgent, listAgents, updateMessage } from "./db";
-import { client as anthropicClient, DEFAULT_MODEL } from "./llm";
+import { clientForUser, DEFAULT_MODEL } from "./llm";
 import { resolveAllTools, executeAnyTool, ToolCtx } from "./tools";
 import { memoriesForContext, memoriesAsSystemBlock } from "./memory";
 import { computeCost, chargeCredits, balance } from "./credits";
@@ -33,7 +33,8 @@ export async function runAgentForSlack(userId: string, agentId: string | null, t
   const { tools } = await resolveAllTools(userId, toolNames);
 
   try {
-    const result = await anthropicClient().messages.create({
+    const ant = await clientForUser(userId);
+    const result = await ant.messages.create({
       model: DEFAULT_MODEL,
       max_tokens: 1024,
       system,

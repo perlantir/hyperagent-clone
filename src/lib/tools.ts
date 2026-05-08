@@ -339,7 +339,7 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
         const { getPrefs } = await import("./preferences");
         const prefs = await getPrefs(ctx.userId);
         const provider = (args.provider || prefs.imageProvider || "gemini") as media.ImageProvider;
-        const base64 = await media.generateImage(args.prompt, { provider, aspectRatio: args.aspectRatio });
+        const base64 = await media.generateImage(args.prompt, { provider, aspectRatio: args.aspectRatio, userId: ctx.userId });
         if (!base64) return "Image generation returned empty.";
         const { createArtifact } = await import("./db");
         const a = await createArtifact({
@@ -370,7 +370,7 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
         const { getPrefs } = await import("./preferences");
         const prefs = await getPrefs(ctx.userId);
         const provider = (args.provider || prefs.speechProvider || "gemini") as media.SpeechProvider;
-        const result = await media.generateSpeech(args.text, { provider, voice: args.voice });
+        const result = await media.generateSpeech(args.text, { provider, voice: args.voice, userId: ctx.userId });
         if (!result.base64) return "TTS returned empty.";
         const { createArtifact } = await import("./db");
         const a = await createArtifact({
@@ -400,7 +400,7 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
         const { getPrefs } = await import("./preferences");
         const prefs = await getPrefs(ctx.userId);
         const provider = (args.provider || prefs.videoProvider || "gemini") as media.VideoProvider;
-        const r = await media.generateVideo(args.prompt, { provider });
+        const r = await media.generateVideo(args.prompt, { provider, userId: ctx.userId });
         return `Video generation started via ${r.provider}. Operation: ${r.operationName}.`;
       } catch (e: any) { return `generate_video error: ${e.message}`; }
     },

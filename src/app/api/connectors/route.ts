@@ -9,7 +9,7 @@ export async function GET() {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
 
   const [toolkits, accounts] = await Promise.all([
-    listToolkits(),
+    listToolkits(user.id),
     listConnectedAccounts(user.id),
   ]);
 

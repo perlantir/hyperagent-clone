@@ -4,8 +4,10 @@
 // Each Hyperagent user gets their own browser session, persisted across tool
 // calls within a thread. Sessions auto-expire after inactivity.
 //
-// HYPERBROWSER_API_KEY env var required. Falls back to clear error messages
-// when missing rather than crashing.
+// API key resolution (via resolveSecret in secrets.ts):
+//   1. User's saved key in Settings → API Keys (preferred)
+//   2. Platform HYPERBROWSER_API_KEY env var (fallback)
+// Throws a clear "Add one in Settings" error if neither is set.
 
 interface BrowserSession {
   id: string;            // Hyperbrowser session id
@@ -19,20 +21,22 @@ interface BrowserSession {
 const sessions = new Map<string, BrowserSession>();
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
-function apiKey(): string {
-  const k = process.env.HYPERBROWSER_API_KEY;
-  if (!k) throw new Error("HYPERBROWSER_API_KEY is not set. Sign up at hyperbrowser.ai and add the key in Vercel env vars.");
+import { resolveSecret } from "./secrets";
+
+async function apiKey(userId: string | null): Promise<string> {
+  const k = await resolveSecret(userId, "hyperbrowser");
+  if (!k) throw new Error("Hyperbrowser API key not configured. Add one in Settings → API Keys.");
   return k;
 }
 
 const API = "https://app.hyperbrowser.ai/api";
 
-async function hbFetch(path: string, init: RequestInit = {}): Promise<any> {
+async function hbFetch(userId: string | null, path: string, init: RequestInit = {}): Promise<any> {
   const r = await fetch(`${API}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      "x-api-key": apiKey(),
+      "x-api-key": await apiKey(userId),
       ...(init.headers || {}),
     },
   });
@@ -42,7 +46,7 @@ async function hbFetch(path: string, init: RequestInit = {}): Promise<any> {
 }
 
 async function startSession(userId: string): Promise<BrowserSession> {
-  const r = await hbFetch("/session", {
+  const r = await hbFetch(userId, "/session", {
     method: "POST",
     body: JSON.stringify({
       useStealth: true,
@@ -74,7 +78,7 @@ export async function ensureSession(userId: string): Promise<BrowserSession> {
 export async function closeSession(userId: string): Promise<void> {
   const s = sessions.get(userId);
   if (!s) return;
-  try { await hbFetch(`/session/${s.id}/stop`, { method: "PUT" }); } catch {}
+  try { await hbFetch(userId, `/session/${s.id}/stop`, { method: "PUT" }); } catch {}
   sessions.delete(userId);
 }
 
@@ -83,7 +87,7 @@ export async function closeSession(userId: string): Promise<void> {
 
 export async function navigate(userId: string, url: string): Promise<{ url: string; title: string }> {
   const s = await ensureSession(userId);
-  const r = await hbFetch(`/session/${s.id}/navigate`, {
+  const r = await hbFetch(userId, `/session/${s.id}/navigate`, {
     method: "POST",
     body: JSON.stringify({ url, waitUntil: "domcontentloaded", timeout: 30000 }),
   });
@@ -92,7 +96,7 @@ export async function navigate(userId: string, url: string): Promise<{ url: stri
 
 export async function screenshot(userId: string, fullPage = false): Promise<string> {
   const s = await ensureSession(userId);
-  const r = await hbFetch(`/session/${s.id}/screenshot`, {
+  const r = await hbFetch(userId, `/session/${s.id}/screenshot`, {
     method: "POST",
     body: JSON.stringify({ fullPage, encoding: "base64" }),
   });
@@ -101,7 +105,7 @@ export async function screenshot(userId: string, fullPage = false): Promise<stri
 
 export async function click(userId: string, selector: string): Promise<void> {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/click`, {
+  await hbFetch(userId, `/session/${s.id}/click`, {
     method: "POST",
     body: JSON.stringify({ selector, timeout: 10000 }),
   });
@@ -109,7 +113,7 @@ export async function click(userId: string, selector: string): Promise<void> {
 
 export async function type(userId: string, selector: string, text: string): Promise<void> {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/type`, {
+  await hbFetch(userId, `/session/${s.id}/type`, {
     method: "POST",
     body: JSON.stringify({ selector, text, delay: 50 }),
   });
@@ -117,7 +121,7 @@ export async function type(userId: string, selector: string, text: string): Prom
 
 export async function pressKey(userId: string, key: string): Promise<void> {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/keyboard`, {
+  await hbFetch(userId, `/session/${s.id}/keyboard`, {
     method: "POST",
     body: JSON.stringify({ key }),
   });
@@ -125,7 +129,7 @@ export async function pressKey(userId: string, key: string): Promise<void> {
 
 export async function getText(userId: string, selector?: string): Promise<string> {
   const s = await ensureSession(userId);
-  const r = await hbFetch(`/session/${s.id}/text`, {
+  const r = await hbFetch(userId, `/session/${s.id}/text`, {
     method: "POST",
     body: JSON.stringify({ selector: selector || "body" }),
   });
@@ -134,13 +138,13 @@ export async function getText(userId: string, selector?: string): Promise<string
 
 export async function getHtml(userId: string): Promise<string> {
   const s = await ensureSession(userId);
-  const r = await hbFetch(`/session/${s.id}/html`, { method: "GET" });
+  const r = await hbFetch(userId, `/session/${s.id}/html`, { method: "GET" });
   return (r.html || r.content || "").slice(0, 16000);
 }
 
 export async function aiExtract(userId: string, instruction: string): Promise<string> {
   const s = await ensureSession(userId);
-  const r = await hbFetch(`/session/${s.id}/extract`, {
+  const r = await hbFetch(userId, `/session/${s.id}/extract`, {
     method: "POST",
     body: JSON.stringify({ instruction }),
   });
@@ -150,7 +154,7 @@ export async function aiExtract(userId: string, instruction: string): Promise<st
 
 export async function scroll(userId: string, direction: "up"|"down"|"top"|"bottom", amount = 600): Promise<void> {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/scroll`, {
+  await hbFetch(userId, `/session/${s.id}/scroll`, {
     method: "POST",
     body: JSON.stringify({ direction, amount }),
   });
@@ -158,7 +162,7 @@ export async function scroll(userId: string, direction: "up"|"down"|"top"|"botto
 
 export async function uploadFile(userId: string, selector: string, fileUrl: string, filename: string): Promise<void> {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/upload`, {
+  await hbFetch(userId, `/session/${s.id}/upload`, {
     method: "POST",
     body: JSON.stringify({ selector, fileUrl, filename }),
   });
@@ -166,7 +170,7 @@ export async function uploadFile(userId: string, selector: string, fileUrl: stri
 
 export async function downloadFile(userId: string, url: string): Promise<{ url: string; filename: string }> {
   const s = await ensureSession(userId);
-  const r = await hbFetch(`/session/${s.id}/download`, {
+  const r = await hbFetch(userId, `/session/${s.id}/download`, {
     method: "POST",
     body: JSON.stringify({ url }),
   });
@@ -178,17 +182,17 @@ export async function downloadFile(userId: string, url: string): Promise<{ url: 
 
 export async function mouseMove(userId: string, x: number, y: number) {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/mouse/move`, { method: "POST", body: JSON.stringify({ x, y }) });
+  await hbFetch(userId, `/session/${s.id}/mouse/move`, { method: "POST", body: JSON.stringify({ x, y }) });
 }
 export async function mouseClick(userId: string, x: number, y: number, button: "left"|"right"|"middle" = "left") {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/mouse/click`, { method: "POST", body: JSON.stringify({ x, y, button }) });
+  await hbFetch(userId, `/session/${s.id}/mouse/click`, { method: "POST", body: JSON.stringify({ x, y, button }) });
 }
 export async function mouseDoubleClick(userId: string, x: number, y: number) {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/mouse/dblclick`, { method: "POST", body: JSON.stringify({ x, y }) });
+  await hbFetch(userId, `/session/${s.id}/mouse/dblclick`, { method: "POST", body: JSON.stringify({ x, y }) });
 }
 export async function keyboardType(userId: string, text: string) {
   const s = await ensureSession(userId);
-  await hbFetch(`/session/${s.id}/keyboard/type`, { method: "POST", body: JSON.stringify({ text }) });
+  await hbFetch(userId, `/session/${s.id}/keyboard/type`, { method: "POST", body: JSON.stringify({ text }) });
 }

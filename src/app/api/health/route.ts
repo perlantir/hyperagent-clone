@@ -1,7 +1,6 @@
-// Health & capability probe (P22 QA).
-// Returns the deployment SHA, runtime, and which provider keys are configured
-// (without leaking values). Useful for diagnosing prod issues without poking
-// around the dashboard.
+// Health & capability probe (P22).
+// Returns deployment metadata and which provider keys are present at the
+// platform (env-var) level. Per-user keys are surfaced via /api/settings/secrets.
 
 import { NextResponse } from "next/server";
 
@@ -16,18 +15,22 @@ export async function GET() {
     branch: process.env.VERCEL_GIT_COMMIT_REF || null,
     region: process.env.VERCEL_REGION || null,
     nodeVersion: process.version,
+    note: "Per-user keys override env-var fallbacks. Visit /settings → API Keys to BYO.",
     capabilities: {
-      anthropic: has("ANTHROPIC_API_KEY"),
       database: has("DATABASE_URL"),
       cron: has("CRON_SECRET"),
-      composio: has("COMPOSIO_API_KEY"),
-      hyperbrowser: has("HYPERBROWSER_API_KEY"),
-      gemini: has("GEMINI_API_KEY"),
-      openai: has("OPENAI_API_KEY"),
-      grok: has("XAI_API_KEY"),
+      encryption: has("ENCRYPTION_KEY"),
+      // Provider env-var fallbacks (false = users MUST set their own key)
+      anthropic_fallback: has("ANTHROPIC_API_KEY"),
+      openai_fallback: has("OPENAI_API_KEY"),
+      gemini_fallback: has("GEMINI_API_KEY"),
+      grok_fallback: has("XAI_API_KEY"),
+      hyperbrowser_fallback: has("HYPERBROWSER_API_KEY"),
+      composio_fallback: has("COMPOSIO_API_KEY"),
+      // Platform-only secrets (not user-scoped)
       stripe: has("STRIPE_SECRET_KEY"),
       stripe_webhook: has("STRIPE_WEBHOOK_SECRET"),
-      slack: has("SLACK_SIGNING_SECRET"),
+      slack_webhook: has("SLACK_SIGNING_SECRET"),
     },
   });
 }

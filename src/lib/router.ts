@@ -1,7 +1,7 @@
 // Multi-agent smart routing. Given a user message + the user's available agents,
 // pick the best one. Uses a small LLM call (the same Anthropic client).
 
-import { client, DEFAULT_MODEL } from "./llm";
+import { clientForUser, DEFAULT_MODEL } from "./llm";
 import type { Agent } from "./types";
 
 export interface RouterDecision {
@@ -9,7 +9,7 @@ export interface RouterDecision {
   reason: string;
 }
 
-export async function routeMessage(message: string, agents: Agent[]): Promise<RouterDecision> {
+export async function routeMessage(message: string, agents: Agent[], userId?: string): Promise<RouterDecision> {
   // Filter out the router agent itself if present.
   const candidates = agents.filter(a => a.name.toLowerCase() !== "router");
   if (!candidates.length) throw new Error("No candidate agents");
@@ -25,7 +25,8 @@ The reason must be ≤ 12 words.`;
 
   const userPrompt = `User message:\n${message}\n\nAgents:\n${list}\n\nRespond with JSON only.`;
 
-  const result = await client().messages.create({
+  const ant = await clientForUser(userId);
+  const result = await ant.messages.create({
     model: DEFAULT_MODEL,
     max_tokens: 200,
     system,
