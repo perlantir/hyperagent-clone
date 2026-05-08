@@ -19,7 +19,7 @@ export async function POST(req: Request) {
     color: body.color || "orange",
     description: body.description || "",
     systemPrompt: body.systemPrompt || "You are a helpful AI assistant.",
-    tools: Array.isArray(body.tools) ? body.tools : ["web_search", "generate_artifact"],
+    tools: Array.isArray(body.tools) ? body.tools : (await import("@/lib/tools")).DEFAULT_AGENT_TOOLS,
   });
   return NextResponse.json({ agent: a });
 }

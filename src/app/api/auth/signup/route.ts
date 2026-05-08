@@ -15,7 +15,7 @@ export async function POST(req: Request) {
     color: "orange",
     description: "Default agent. Helpful, careful, transparent about uncertainty.",
     systemPrompt: "You are a helpful AI assistant. Be concise and accurate. When you do not know something, say so. Use tools when relevant.",
-    tools: ["web_search", "generate_artifact"],
+    tools: (await import("@/lib/tools")).DEFAULT_AGENT_TOOLS,
   });
   await setSessionCookie(user.id);
   return NextResponse.json({ id: user.id, email: user.email, name: user.name });

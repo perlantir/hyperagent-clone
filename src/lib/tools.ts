@@ -1,8 +1,9 @@
-// Tool registry. Two layers:
-//   1. Built-in tools that always work (web_search, generate_artifact, slack_notify stub)
-//   2. Composio-managed tools for connected toolkits (Slack, Gmail, Linear, GitHub, etc.)
-//      Composio handles OAuth + execution. We just merge the tool schemas in.
+// Tool registry. Three layers:
+//   1. Built-in tools that always work (web_search, generate_artifact)
+//   2. Browser/computer-use tools backed by Hyperbrowser (real cloud Chromium)
+//   3. Composio-managed tools (currently stubbed)
 
+import * as browser from "./browser";
 import { getComposioTools, executeComposioTool, listConnectedAccounts } from "./composio";
 
 export interface ToolDef {
@@ -85,6 +86,238 @@ export const BUILTIN_TOOLS: Record<string, ToolDef> = {
       return `Artifact saved: id=${a.id} title="${a.title}"`;
     },
   },
+
+  // ============ BROWSER AUTOMATION (Hyperbrowser) ============
+
+  browser_navigate: {
+    name: "browser_navigate",
+    description: "Open a URL in the user's browser session. Creates a session if none exists. Returns the final URL and page title.",
+    input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    async execute(args, ctx) {
+      try {
+        const r = await browser.navigate(ctx.userId, args.url);
+        return `Navigated to ${r.url}\nTitle: ${r.title}`;
+      } catch (e: any) { return `browser_navigate error: ${e.message}`; }
+    },
+  },
+
+  browser_screenshot: {
+    name: "browser_screenshot",
+    description: "Capture a screenshot of the current page. Saves it as an image artifact and returns the artifact id.",
+    input_schema: {
+      type: "object",
+      properties: { fullPage: { type: "boolean", description: "Capture full scrollable page (default false)" } },
+    },
+    async execute(args, ctx) {
+      try {
+        const base64 = await browser.screenshot(ctx.userId, args.fullPage || false);
+        if (!base64) return "Screenshot returned empty data.";
+        const { createArtifact } = await import("./db");
+        const html = `<img src="data:image/png;base64,${base64}" style="max-width:100%;display:block">`;
+        const a = await createArtifact({
+          threadId: ctx.threadId, messageId: ctx.messageId,
+          type: "image", title: `Screenshot ${new Date().toISOString().slice(0,16)}`, body: html,
+        });
+        ctx.artifactsCreated.push({ id: a.id, type: a.type, title: a.title });
+        return `Screenshot saved as artifact id=${a.id}`;
+      } catch (e: any) { return `browser_screenshot error: ${e.message}`; }
+    },
+  },
+
+  browser_click: {
+    name: "browser_click",
+    description: "Click an element on the current page using a CSS selector. Use #id, .class, [data-attr=value], or button:has-text() patterns.",
+    input_schema: { type: "object", properties: { selector: { type: "string" } }, required: ["selector"] },
+    async execute(args, ctx) {
+      try {
+        await browser.click(ctx.userId, args.selector);
+        return `Clicked ${args.selector}`;
+      } catch (e: any) { return `browser_click error: ${e.message}`; }
+    },
+  },
+
+  browser_type: {
+    name: "browser_type",
+    description: "Type text into a form field identified by CSS selector. Use after browser_click on the input first.",
+    input_schema: {
+      type: "object",
+      properties: { selector: { type: "string" }, text: { type: "string" } },
+      required: ["selector","text"],
+    },
+    async execute(args, ctx) {
+      try {
+        await browser.type(ctx.userId, args.selector, args.text);
+        return `Typed ${args.text.length} chars into ${args.selector}`;
+      } catch (e: any) { return `browser_type error: ${e.message}`; }
+    },
+  },
+
+  browser_press_key: {
+    name: "browser_press_key",
+    description: "Press a keyboard key (e.g. 'Enter', 'Tab', 'Escape', 'ArrowDown').",
+    input_schema: { type: "object", properties: { key: { type: "string" } }, required: ["key"] },
+    async execute(args, ctx) {
+      try { await browser.pressKey(ctx.userId, args.key); return `Pressed ${args.key}`; }
+      catch (e: any) { return `browser_press_key error: ${e.message}`; }
+    },
+  },
+
+  browser_get_text: {
+    name: "browser_get_text",
+    description: "Get text content of the page or a specific element. Pass a CSS selector to scope, omit for full page.",
+    input_schema: { type: "object", properties: { selector: { type: "string" } } },
+    async execute(args, ctx) {
+      try { return await browser.getText(ctx.userId, args.selector); }
+      catch (e: any) { return `browser_get_text error: ${e.message}`; }
+    },
+  },
+
+  browser_extract: {
+    name: "browser_extract",
+    description: "AI-powered extraction. Pass a natural-language instruction like 'extract all product names and prices' and get structured data back.",
+    input_schema: { type: "object", properties: { instruction: { type: "string" } }, required: ["instruction"] },
+    async execute(args, ctx) {
+      try { return await browser.aiExtract(ctx.userId, args.instruction); }
+      catch (e: any) { return `browser_extract error: ${e.message}`; }
+    },
+  },
+
+  browser_scroll: {
+    name: "browser_scroll",
+    description: "Scroll the page. Direction is 'up', 'down', 'top', or 'bottom'.",
+    input_schema: {
+      type: "object",
+      properties: {
+        direction: { type: "string", enum: ["up","down","top","bottom"] },
+        amount: { type: "number", description: "Pixels for up/down (default 600)" },
+      },
+      required: ["direction"],
+    },
+    async execute(args, ctx) {
+      try { await browser.scroll(ctx.userId, args.direction, args.amount); return `Scrolled ${args.direction}`; }
+      catch (e: any) { return `browser_scroll error: ${e.message}`; }
+    },
+  },
+
+  browser_close: {
+    name: "browser_close",
+    description: "Close the current browser session. Frees server resources. The next browser_navigate call will start a new session.",
+    input_schema: { type: "object", properties: {} },
+    async execute(_args, ctx) {
+      try { await browser.closeSession(ctx.userId); return "Browser session closed"; }
+      catch (e: any) { return `browser_close error: ${e.message}`; }
+    },
+  },
+
+  // ============ COMPUTER USE (pixel-precise) ============
+  // These map the Anthropic computer_use_20241022 action set onto a
+  // Hyperbrowser session. Coordinates are pixel offsets in the browser
+  // viewport (default 1280×720). For agents that need pixel-precise control.
+
+  computer_screenshot: {
+    name: "computer_screenshot",
+    description: "Take a screenshot of the virtual desktop (browser viewport). Returns artifact id of the captured PNG.",
+    input_schema: { type: "object", properties: {} },
+    async execute(_args, ctx) {
+      try {
+        const base64 = await browser.screenshot(ctx.userId, false);
+        const { createArtifact } = await import("./db");
+        const html = `<img src="data:image/png;base64,${base64}" style="max-width:100%;display:block">`;
+        const a = await createArtifact({
+          threadId: ctx.threadId, messageId: ctx.messageId,
+          type: "image", title: `Computer screenshot ${new Date().toISOString().slice(11,19)}`, body: html,
+        });
+        ctx.artifactsCreated.push({ id: a.id, type: a.type, title: a.title });
+        return `Screenshot id=${a.id}`;
+      } catch (e: any) { return `computer_screenshot error: ${e.message}`; }
+    },
+  },
+
+  computer_click: {
+    name: "computer_click",
+    description: "Click at pixel coordinates (x, y) in the virtual desktop.",
+    input_schema: {
+      type: "object",
+      properties: {
+        x: { type: "number" },
+        y: { type: "number" },
+        button: { type: "string", enum: ["left","right","middle"] },
+        double: { type: "boolean" },
+      },
+      required: ["x","y"],
+    },
+    async execute(args, ctx) {
+      try {
+        if (args.double) await browser.mouseDoubleClick(ctx.userId, args.x, args.y);
+        else await browser.mouseClick(ctx.userId, args.x, args.y, args.button || "left");
+        return `Clicked (${args.x},${args.y})`;
+      } catch (e: any) { return `computer_click error: ${e.message}`; }
+    },
+  },
+
+  computer_move: {
+    name: "computer_move",
+    description: "Move the mouse to pixel coordinates without clicking.",
+    input_schema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" } }, required: ["x","y"] },
+    async execute(args, ctx) {
+      try { await browser.mouseMove(ctx.userId, args.x, args.y); return `Moved to (${args.x},${args.y})`; }
+      catch (e: any) { return `computer_move error: ${e.message}`; }
+    },
+  },
+
+  computer_type: {
+    name: "computer_type",
+    description: "Type text into the focused element (no selector needed). Use computer_click first to focus.",
+    input_schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    async execute(args, ctx) {
+      try { await browser.keyboardType(ctx.userId, args.text); return `Typed ${args.text.length} chars`; }
+      catch (e: any) { return `computer_type error: ${e.message}`; }
+    },
+  },
+
+  computer_key: {
+    name: "computer_key",
+    description: "Press a keyboard key — 'Enter', 'Tab', 'Escape', 'Meta+a', 'Control+c', etc.",
+    input_schema: { type: "object", properties: { key: { type: "string" } }, required: ["key"] },
+    async execute(args, ctx) {
+      try { await browser.pressKey(ctx.userId, args.key); return `Pressed ${args.key}`; }
+      catch (e: any) { return `computer_key error: ${e.message}`; }
+    },
+  },
+
+  // ============ FILE OPERATIONS ============
+
+  upload_file_to_page: {
+    name: "upload_file_to_page",
+    description: "Upload a file to a file-input on the current page. Pass a publicly accessible URL of the file plus the CSS selector of the <input type=file>.",
+    input_schema: {
+      type: "object",
+      properties: {
+        selector: { type: "string" },
+        fileUrl: { type: "string" },
+        filename: { type: "string" },
+      },
+      required: ["selector","fileUrl","filename"],
+    },
+    async execute(args, ctx) {
+      try {
+        await browser.uploadFile(ctx.userId, args.selector, args.fileUrl, args.filename);
+        return `Uploaded ${args.filename} to ${args.selector}`;
+      } catch (e: any) { return `upload_file_to_page error: ${e.message}`; }
+    },
+  },
+
+  download_file: {
+    name: "download_file",
+    description: "Download a file from a URL and capture it. Returns the downloaded URL + filename.",
+    input_schema: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+    async execute(args, ctx) {
+      try {
+        const r = await browser.downloadFile(ctx.userId, args.url);
+        return `Downloaded ${r.filename} → ${r.url}`;
+      } catch (e: any) { return `download_file error: ${e.message}`; }
+    },
+  },
 };
 
 // Anthropic-format tool spec
@@ -101,19 +334,15 @@ export async function resolveAllTools(
   userId: string,
   agentToolNames: string[],
 ): Promise<{ tools: AnthropicTool[]; composioToolNames: Set<string>; builtinTools: ToolDef[] }> {
-  // Built-ins requested by the agent
   const builtinTools: ToolDef[] = [];
   for (const name of agentToolNames) {
     if (BUILTIN_TOOLS[name]) builtinTools.push(BUILTIN_TOOLS[name]);
   }
 
-  // Discover the user's connected Composio toolkits
   const connected = await listConnectedAccounts(userId);
   const connectedToolkits = Array.from(
     new Set(connected.map((c: any) => c.toolkit?.slug || c.appName || c.app_name).filter(Boolean)),
   ) as string[];
-
-  // Pull Anthropic-format tool defs for those toolkits
   const composioTools = await getComposioTools(userId, connectedToolkits);
 
   const tools: AnthropicTool[] = [
@@ -140,3 +369,25 @@ export async function executeAnyTool(
   if (composioToolNames.has(name)) return await executeComposioTool(ctx.userId, name, args);
   return `Unknown tool: ${name}`;
 }
+
+// Default tool list for newly-created agents
+export const DEFAULT_AGENT_TOOLS = [
+  "web_search",
+  "generate_artifact",
+  "browser_navigate",
+  "browser_screenshot",
+  "browser_click",
+  "browser_type",
+  "browser_press_key",
+  "browser_get_text",
+  "browser_extract",
+  "browser_scroll",
+  "browser_close",
+  "computer_screenshot",
+  "computer_click",
+  "computer_move",
+  "computer_type",
+  "computer_key",
+  "upload_file_to_page",
+  "download_file",
+];
