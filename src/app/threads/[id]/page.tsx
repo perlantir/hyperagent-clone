@@ -5,6 +5,7 @@ import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 import { ChatView } from "@/components/ChatView";
 import { LiveblocksRoom } from "@/components/LiveblocksRoom";
+import { PresenceAvatars } from "@/components/PresenceAvatars";
 
 export default async function ThreadPage({ params }: { params: { id: string } }) {
   const user = await getCurrentUser();
@@ -22,6 +23,7 @@ export default async function ThreadPage({ params }: { params: { id: string } })
               <span style={{ color: "var(--text)", fontWeight: 500 }}>{thread.title}</span>
             </div>
           }
+          actions={<PresenceAvatars />}
         />
         <ChatView threadId={thread.id} agentId={thread.agentId} />
       </LiveblocksRoom>

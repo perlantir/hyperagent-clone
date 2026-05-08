@@ -1,9 +1,11 @@
 "use client";
-// Renders a small stack of avatars showing who's currently in this thread.
-// Reads from the Liveblocks room. Renders nothing if Liveblocks is disabled
-// or the room has only one (current) user.
+// Stack of avatars showing who's currently in this thread.
+// Reads from the Liveblocks room. Renders nothing when:
+//   - Liveblocks isn't configured (no provider in tree)
+//   - We haven't connected yet (self is null)
+//   - There's only one user (self) — no point showing your own avatar alone
 
-import { useOthers, useSelf } from "@liveblocks/react/suspense";
+import { useOthers, useSelf } from "@liveblocks/react";
 
 export function PresenceAvatars() {
   const others = useOthers();
