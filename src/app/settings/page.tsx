@@ -77,6 +77,11 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState(false);
   const [secretProviders, setSecretProviders] = useState<any[]>([]);
   const [secretStatus, setSecretStatus] = useState<Record<string, "user" | "platform" | "missing">>({});
+  const [slackWorkspaces, setSlackWorkspaces] = useState<any[]>([]);
+  const [agents, setAgents] = useState<any[]>([]);
+  const [slackForm, setSlackForm] = useState({ teamId: "", botToken: "", agentId: "" });
+  const [slackSaving, setSlackSaving] = useState(false);
+  const [slackError, setSlackError] = useState("");
 
   async function reload() {
     const meR = await (await fetch("/api/auth/me")).json();
@@ -89,8 +94,32 @@ export default function SettingsPage() {
     const s = await (await fetch("/api/settings/secrets")).json();
     setSecretProviders(s.providers || []);
     setSecretStatus(s.secrets || {});
+    const sw = await (await fetch("/api/settings/slack-workspaces")).json();
+    setSlackWorkspaces(sw.workspaces || []);
+    const ag = await (await fetch("/api/agents")).json();
+    setAgents(ag.agents || []);
   }
   useEffect(() => { reload(); }, []);
+
+  async function saveSlackWorkspace() {
+    setSlackSaving(true); setSlackError("");
+    const r = await fetch("/api/settings/slack-workspaces", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(slackForm),
+    });
+    setSlackSaving(false);
+    if (r.ok) {
+      setSlackForm({ teamId: "", botToken: "", agentId: "" });
+      reload();
+    } else {
+      setSlackError((await r.json()).error || "Failed");
+    }
+  }
+  async function deleteSlackWorkspace(teamId: string) {
+    if (!confirm("Disconnect Slack workspace " + teamId + "?")) return;
+    await fetch("/api/settings/slack-workspaces/" + teamId, { method: "DELETE" });
+    reload();
+  }
 
   async function saveSecret(providerId: string, value: string) {
     const r = await fetch("/api/settings/secrets", {
@@ -187,6 +216,64 @@ export default function SettingsPage() {
                   onSave={v => saveSecret(p.id, v)}
                   onDelete={() => deleteSecret(p.id)} />
               ))}
+            </div>
+          </div>
+
+          {/* Slack Workspaces */}
+          <div style={{ marginBottom: 40 }}>
+            <div className="h-section" style={{ marginBottom: 12 }}>Slack Workspaces</div>
+            <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 12 }}>
+              Connect a Slack workspace so an agent can reply to messages and mentions in real time.
+              Set up a Slack app at <a href="https://api.slack.com/apps" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>api.slack.com/apps</a>,
+              configure the Events URL to <code>{typeof window !== "undefined" ? window.location.origin : ""}/api/slack/events</code>,
+              and paste the bot token (xoxb-…) here.
+            </div>
+            {slackWorkspaces.length > 0 && (
+              <div style={{ marginBottom: 16, display: "grid", gap: 6 }}>
+                {slackWorkspaces.map((w: any) => (
+                  <div key={w.teamId} className="card" style={{ padding: 12, display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{w.teamId}</div>
+                      <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                        Token {w.botTokenRedacted} · {w.agentId
+                          ? <>responds as <strong>{agents.find((a:any) => a.id === w.agentId)?.name || w.agentId}</strong></>
+                          : <em>no agent bound — won't respond yet</em>}
+                      </div>
+                    </div>
+                    <button className="btn" onClick={() => deleteSlackWorkspace(w.teamId)}
+                      style={{ fontSize: 12, padding: "6px 12px" }}>Disconnect</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="card" style={{ padding: 16 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Connect a workspace</div>
+              <div style={{ display: "grid", gap: 8 }}>
+                <input
+                  placeholder="Team ID (T01ABCXYZ — find at api.slack.com/methods/auth.test/test)"
+                  value={slackForm.teamId}
+                  onChange={e => setSlackForm({ ...slackForm, teamId: e.target.value.trim() })}
+                  style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, fontFamily: "monospace" }}
+                />
+                <input type="password"
+                  placeholder="Bot token (xoxb-…)"
+                  value={slackForm.botToken}
+                  onChange={e => setSlackForm({ ...slackForm, botToken: e.target.value.trim() })}
+                  style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, fontFamily: "monospace" }}
+                />
+                <select value={slackForm.agentId}
+                  onChange={e => setSlackForm({ ...slackForm, agentId: e.target.value })}
+                  style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13 }}>
+                  <option value="">— Pick an agent to respond as —</option>
+                  {agents.map((a: any) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                </select>
+                {slackError && <div style={{ fontSize: 12, color: "#dc2626" }}>{slackError}</div>}
+                <button className="btn btn-primary" onClick={saveSlackWorkspace}
+                  disabled={!slackForm.teamId || !slackForm.botToken || slackSaving}
+                  style={{ fontSize: 12, padding: "8px 14px", justifyContent: "center" }}>
+                  {slackSaving ? "Verifying token…" : "Connect workspace"}
+                </button>
+              </div>
             </div>
           </div>
 
