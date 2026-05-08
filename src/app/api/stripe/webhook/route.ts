@@ -21,13 +21,15 @@ export async function POST(req: Request) {
   if (secret && !verifyStripe(body, req.headers.get("stripe-signature"), secret)) {
     return NextResponse.json({ error: "bad signature" }, { status: 401 });
   }
-  const event = JSON.parse(body);
-  if (event.type === "checkout.session.completed") {
-    const sess = event.data.object;
-    const userId = sess.metadata?.userId || sess.client_reference_id;
-    const credits = parseInt(sess.metadata?.credits || "0", 10);
-    if (userId && credits > 0) {
-      await addCredits(userId, credits, `Stripe top-up (${sess.id})`, sess.id);
+  let event: any;
+  try { event = JSON.parse(body); } catch { return NextResponse.json({ error: "bad body" }, { status: 400 }); }
+  if (event?.type === "checkout.session.completed") {
+    const sess = event?.data?.object;
+    const userId = sess?.metadata?.userId || sess?.client_reference_id;
+    const credits = parseInt(sess?.metadata?.credits || "0", 10);
+    if (userId && credits > 0 && sess?.id) {
+      try { await addCredits(userId, credits, `Stripe top-up (${sess.id})`, sess.id); }
+      catch (e) { console.error("[stripe webhook]", e); }
     }
   }
   return NextResponse.json({ ok: true });
