@@ -12,6 +12,7 @@ import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 import { Skeleton } from "@/components/Skeleton";
+import { ThreadActionsMenu } from "@/components/ThreadActionsMenu";
 
 interface Thread {
   id: string;
@@ -36,11 +37,20 @@ export default function ThreadsListPage() {
   const [search, setSearch] = useState("");
   const [agentFilter, setAgentFilter] = useState<string>("all");
   const [creating, setCreating] = useState(false);
+  // P50 — Show archived toggle. Archived threads are hidden by default;
+  // toggling fetches with ?archived=1 and they show with reduced opacity.
+  const [showArchived, setShowArchived] = useState(false);
+
+  function reload() {
+    fetch(`/api/threads${showArchived ? "?archived=1" : ""}`)
+      .then(r => r.json()).then(j => setThreads(j.threads || []));
+  }
 
   useEffect(() => {
-    fetch("/api/threads").then(r => r.json()).then(j => setThreads(j.threads || []));
+    reload();
     fetch("/api/agents").then(r => r.json()).then(j => setAgents(j.agents || []));
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showArchived]);
 
   async function newThread(agentId: string | null = null) {
     setCreating(true);
@@ -88,6 +98,12 @@ export default function ThreadsListPage() {
               <option value="">No agent</option>
               {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
+            <button onClick={() => setShowArchived(s => !s)}
+              className={`chip ${showArchived ? "active" : ""}`}
+              style={{ fontSize: 12.5, padding: "5px 12px" }}
+              title="Toggle archived threads">
+              {showArchived ? "Hiding active" : "Show archived"}
+            </button>
           </div>
 
           {/* Quick-start agents row */}
@@ -124,7 +140,7 @@ export default function ThreadsListPage() {
                   <div className="h-section" style={{ marginBottom: 10 }}>{group.label} · {group.threads.length}</div>
                   <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
                     {group.threads.map((t, i) => (
-                      <ThreadRow key={t.id} thread={t} agent={agents.find(a => a.id === t.agentId)} first={i === 0} />
+                      <ThreadRow key={t.id} thread={t} agent={agents.find(a => a.id === t.agentId)} first={i === 0} onChanged={reload} />
                     ))}
                   </div>
                 </div>
@@ -142,36 +158,53 @@ export default function ThreadsListPage() {
   );
 }
 
-function ThreadRow({ thread, agent, first }: { thread: Thread; agent?: AgentRow; first: boolean }) {
+function ThreadRow({ thread, agent, first, onChanged }: { thread: Thread; agent?: AgentRow; first: boolean; onChanged?: () => void }) {
   return (
-    <Link href={`/threads/${thread.id}`} style={{
-      display: "flex", alignItems: "center", gap: 12,
-      padding: "12px 16px", borderTop: first ? "none" : "1px solid var(--border)",
-      textDecoration: "none", color: "inherit",
-      transition: "background 0.1s",
+    <div className="threads-list-row" style={{
+      position: "relative", display: "flex", alignItems: "center",
+      borderTop: first ? "none" : "1px solid var(--border)",
     }}>
-      {agent ? (
-        <span style={{
-          width: 26, height: 26, borderRadius: 6,
-          background: COLORS[agent.color] || COLORS.orange,
-          color: "white", display: "grid", placeItems: "center",
-          fontSize: 11, fontWeight: 700, flexShrink: 0,
-        }}>{agent.icon}</span>
-      ) : (
-        <span style={{
-          width: 26, height: 26, borderRadius: 6,
-          background: "var(--bg-subtle)", color: "var(--text-faint)",
-          display: "grid", placeItems: "center", fontSize: 13,
-        }}>·</span>
-      )}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{thread.title}</div>
-        {agent && <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 1 }}>{agent.name}</div>}
-      </div>
-      <div style={{ fontSize: 11.5, color: "var(--text-faint)", whiteSpace: "nowrap" }}>
-        {formatRelative(Date.now() - thread.updatedAt)}
-      </div>
-    </Link>
+      <Link href={`/threads/${thread.id}`} style={{
+        flex: 1, display: "flex", alignItems: "center", gap: 12,
+        padding: "12px 16px",
+        textDecoration: "none", color: "inherit",
+        transition: "background 0.1s", minWidth: 0,
+      }}>
+        {agent ? (
+          <span style={{
+            width: 26, height: 26, borderRadius: 6,
+            background: COLORS[agent.color] || COLORS.orange,
+            color: "white", display: "grid", placeItems: "center",
+            fontSize: 11, fontWeight: 700, flexShrink: 0,
+          }}>{agent.icon}</span>
+        ) : (
+          <span style={{
+            width: 26, height: 26, borderRadius: 6,
+            background: "var(--bg-subtle)", color: "var(--text-faint)",
+            display: "grid", placeItems: "center", fontSize: 13,
+          }}>·</span>
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{thread.title}</div>
+          {agent && <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 1 }}>{agent.name}</div>}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--text-faint)", whiteSpace: "nowrap", paddingRight: 30 }}>
+          {formatRelative(Date.now() - thread.updatedAt)}
+        </div>
+      </Link>
+      {/* P50 — 3-dot menu */}
+      <span className="threads-list-actions"
+        style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)" }}>
+        <ThreadActionsMenu
+          threadId={thread.id}
+          threadTitle={thread.title}
+          threadProjectId={(thread as any).projectId ?? null}
+          onChanged={onChanged}
+          onDeleted={onChanged}
+          variant="icon"
+        />
+      </span>
+    </div>
   );
 }
 

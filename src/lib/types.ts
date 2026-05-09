@@ -13,6 +13,10 @@ export interface Thread {
   agentId: string | null;
   createdAt: number;
   updatedAt: number;
+  // P50 — archived threads stay in the DB but disappear from the sidebar
+  // / threads list by default. Exposed via "Show archived" toggle. Soft-
+  // delete model: archive is reversible, true delete is the trash button.
+  archivedAt?: number | null;
 }
 
 export interface Message {

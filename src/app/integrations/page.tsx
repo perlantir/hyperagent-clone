@@ -66,7 +66,14 @@ function IntegrationsInner() {
 
   const filtered = connectors.filter(c => {
     if (filter === "connected" && !c.connected) return false;
-    if (search && !c.name.toLowerCase().includes(search.toLowerCase()) && !c.slug.includes(search.toLowerCase())) return false;
+    // Defensive lower-casing — Composio returns the occasional toolkit
+    // entry with name=null/undefined, which would crash the "All" filter
+    // when search is empty AND a missing-name row is in the list. Coerce
+    // to "" so .toLowerCase / .includes never throws.
+    const nameLc = (c.name || "").toLowerCase();
+    const slugLc = (c.slug || "").toLowerCase();
+    const q = search.toLowerCase();
+    if (search && !nameLc.includes(q) && !slugLc.includes(q)) return false;
     return true;
   });
 

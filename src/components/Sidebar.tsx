@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { ThemeToggle } from "./ThemeToggle";
+import { ThreadActionsMenu } from "@/components/ThreadActionsMenu";
 
 interface NavLink { href: string; label: string; icon: string; }
 const NAV: NavLink[] = [
@@ -78,9 +79,27 @@ export function Sidebar() {
               color: "var(--text-faint)", letterSpacing: 0.6, textTransform: "uppercase",
             }}>{group.label}</div>
             {group.threads.slice(0, 8).map(t => (
-              <Link key={t.id} href={`/threads/${t.id}`} className="side-row" style={rowStyle(pathname === `/threads/${t.id}`, true)}>
-                {t.title}
-              </Link>
+              <div key={t.id} className="sidebar-thread-row" style={{
+                position: "relative", display: "flex", alignItems: "center",
+              }}>
+                <Link href={`/threads/${t.id}`} className="side-row"
+                  style={{ ...rowStyle(pathname === `/threads/${t.id}`, true), flex: 1, minWidth: 0, paddingRight: 24 }}>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{t.title}</span>
+                </Link>
+                {/* P50 — 3-dot menu on hover. Absolutely-positioned to avoid
+                    pushing the title text on row width changes. */}
+                <span className="sidebar-thread-actions"
+                  style={{ position: "absolute", right: 6, top: "50%", transform: "translateY(-50%)" }}>
+                  <ThreadActionsMenu
+                    threadId={t.id}
+                    threadTitle={t.title}
+                    threadProjectId={t.projectId ?? null}
+                    onChanged={() => { router.refresh(); }}
+                    onDeleted={() => setThreads(s => s.filter(x => x.id !== t.id))}
+                    variant="icon"
+                  />
+                </span>
+              </div>
             ))}
           </div>
         ))}

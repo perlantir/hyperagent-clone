@@ -64,6 +64,10 @@ async function initSchema() {
     -- only those toolkits are exposed AT ALL — connectorScopes refines further
     -- *within* each bound toolkit.
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS "connectorScopes" JSONB NOT NULL DEFAULT '{}'::jsonb;
+    -- P50 — soft-archive for threads. Sidebar + list filter on archivedAt
+    -- IS NULL by default; "Show archived" reveals the archived rows.
+    ALTER TABLE threads ADD COLUMN IF NOT EXISTS "archivedAt" BIGINT;
+    CREATE INDEX IF NOT EXISTS idx_threads_user_archived ON threads("userId", "archivedAt", "updatedAt" DESC);
     -- P41 — per-agent email inbound addresses. Each address routes incoming
     -- email to a specific agent. Address format: <slug>@<domain> (domain is
     -- platform-configured). Multiple addresses per agent allowed (e.g. one
@@ -358,11 +362,20 @@ export async function deleteProject(id: string, userId: string) {
 }
 
 // THREADS
-export async function listThreads(userId: string, projectId?: string | null): Promise<Thread[]> {
+// P50 — listThreads accepts an optional includeArchived flag. Default
+// (false) hides archivedAt IS NOT NULL rows so the sidebar / list views
+// stay clean. Pass includeArchived=true to surface archived threads in
+// the dedicated "Show archived" view.
+export async function listThreads(
+  userId: string,
+  projectId?: string | null,
+  opts: { includeArchived?: boolean } = {},
+): Promise<Thread[]> {
+  const archivedClause = opts.includeArchived ? "" : ` AND "archivedAt" IS NULL`;
   if (projectId === undefined) {
-    return q(`SELECT * FROM threads WHERE "userId"=$1 ORDER BY "updatedAt" DESC`, [userId]);
+    return q(`SELECT * FROM threads WHERE "userId"=$1${archivedClause} ORDER BY "updatedAt" DESC`, [userId]);
   }
-  return q(`SELECT * FROM threads WHERE "userId"=$1 AND "projectId" IS NOT DISTINCT FROM $2 ORDER BY "updatedAt" DESC`,
+  return q(`SELECT * FROM threads WHERE "userId"=$1 AND "projectId" IS NOT DISTINCT FROM $2${archivedClause} ORDER BY "updatedAt" DESC`,
     [userId, projectId]);
 }
 export async function getThread(id: string, userId: string): Promise<Thread | null> {
@@ -374,11 +387,14 @@ export async function createThread(userId: string, title: string, agentId: strin
     [id, userId, projectId, title, agentId, now, now]);
   return { id, userId, projectId, title, agentId, createdAt: now, updatedAt: now };
 }
-export async function updateThread(id: string, userId: string, fields: { title?: string; updatedAt?: number; agentId?: string | null; projectId?: string | null }) {
+export async function updateThread(id: string, userId: string, fields: { title?: string; updatedAt?: number; agentId?: string | null; projectId?: string | null; archivedAt?: number | null }) {
   const cur = await getThread(id, userId); if (!cur) return;
   const n = { ...cur, ...fields, updatedAt: Date.now() };
-  await q(`UPDATE threads SET title=$1,"agentId"=$2,"projectId"=$3,"updatedAt"=$4 WHERE id=$5 AND "userId"=$6`,
-    [n.title, n.agentId, n.projectId, n.updatedAt, id, userId]);
+  // archivedAt is undefined-when-omitted to preserve the value, but
+  // explicit null = "unarchive" so we can't just `?? cur.archivedAt`.
+  const archivedAt = fields.archivedAt === undefined ? (cur as any).archivedAt ?? null : fields.archivedAt;
+  await q(`UPDATE threads SET title=$1,"agentId"=$2,"projectId"=$3,"updatedAt"=$4,"archivedAt"=$5 WHERE id=$6 AND "userId"=$7`,
+    [n.title, n.agentId, n.projectId, n.updatedAt, archivedAt, id, userId]);
 }
 export async function deleteThread(id: string, userId: string) {
   await q(`DELETE FROM threads WHERE id=$1 AND "userId"=$2`, [id, userId]);
