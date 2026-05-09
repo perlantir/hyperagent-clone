@@ -5,6 +5,20 @@ import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 
+// P60 — coerce arbitrary input to a renderable string. Handles the
+// recurring failure mode where Composio occasionally returns object-
+// shaped name / category fields (i18n maps, {name, slug} envelopes)
+// that React refuses to render as children.
+function toRenderableString(v: any): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (typeof v === "object") {
+    return v.en || v.default || v.value || v.name || v.label || v.slug || "";
+  }
+  return "";
+}
+
 export default function IntegrationsPage() {
   return <Suspense fallback={null}><IntegrationsInner /></Suspense>;
 }
@@ -111,37 +125,49 @@ function IntegrationsInner() {
             </div>
           ) : (
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px,1fr))", gap: 12 }}>
-              {filtered.map(c => (
-                <div key={c.slug} className="card" style={{ padding: 16, display: "flex", alignItems: "center", gap: 12 }}>
-                  <div style={{
-                    width: 40, height: 40, borderRadius: 9,
-                    background: "var(--bg-subtle)",
-                    display: "grid", placeItems: "center",
-                    fontSize: 18, fontWeight: 700,
-                    overflow: "hidden",
-                    flexShrink: 0,
-                  }}>
-                    {c.logo ? (
-                      <img src={c.logo} alt={c.name} style={{ width: 28, height: 28, objectFit: "contain" }} />
+              {filtered.map(c => {
+                // P60 — defense in depth: coerce every rendered field to a
+                // string here too, even though the API layer should already
+                // be doing it. If a future Composio response slips through
+                // with an object-shaped name or category, we fall back to
+                // sane strings rather than crashing the whole page.
+                const safeName = toRenderableString(c.name) || toRenderableString(c.slug) || "(unnamed)";
+                const safeSlug = toRenderableString(c.slug);
+                const safeCategory = toRenderableString(Array.isArray(c.categories) ? c.categories[0] : null);
+                const safeLogo = typeof c.logo === "string" ? c.logo : "";
+                const initial = (safeName[0] || "?").toUpperCase();
+                return (
+                  <div key={safeSlug || initial + Math.random()} className="card" style={{ padding: 16, display: "flex", alignItems: "center", gap: 12 }}>
+                    <div style={{
+                      width: 40, height: 40, borderRadius: 9,
+                      background: "var(--bg-subtle)",
+                      display: "grid", placeItems: "center",
+                      fontSize: 18, fontWeight: 700,
+                      overflow: "hidden",
+                      flexShrink: 0,
+                    }}>
+                      {safeLogo ? (
+                        <img src={safeLogo} alt={safeName} style={{ width: 28, height: 28, objectFit: "contain" }} />
+                      ) : (
+                        initial
+                      )}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{safeName}</div>
+                      <div style={{ fontSize: 11.5, color: c.connected ? "var(--green)" : "var(--text-muted)" }}>
+                        {c.connected ? "● Connected" : (safeCategory || "Available")}
+                      </div>
+                    </div>
+                    {c.connected ? (
+                      <button className="btn" onClick={() => disconnect(safeSlug)}>Disconnect</button>
                     ) : (
-                      (c.name?.[0] || "?").toUpperCase()
+                      <button className="btn btn-primary" disabled={connecting === safeSlug} onClick={() => connect(safeSlug)}>
+                        {connecting === safeSlug ? "Waiting…" : "Connect"}
+                      </button>
                     )}
                   </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</div>
-                    <div style={{ fontSize: 11.5, color: c.connected ? "var(--green)" : "var(--text-muted)" }}>
-                      {c.connected ? "● Connected" : (c.categories?.[0] || "Available")}
-                    </div>
-                  </div>
-                  {c.connected ? (
-                    <button className="btn" onClick={() => disconnect(c.slug)}>Disconnect</button>
-                  ) : (
-                    <button className="btn btn-primary" disabled={connecting === c.slug} onClick={() => connect(c.slug)}>
-                      {connecting === c.slug ? "Waiting…" : "Connect"}
-                    </button>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

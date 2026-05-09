@@ -73,15 +73,35 @@ export async function listToolkits(userId: string | null = null): Promise<Toolki
       cursor = j.next_cursor || j.nextCursor || null;
       if (!cursor || items.length === 0) break;
     }
+    // P60 — coerce every renderable field to a primitive string. Composio
+    // occasionally returns name / description as i18n-style objects
+    // ({en: "Gmail"}), and categories as arrays of {name, slug} objects.
+    // Rendering those directly as React children crashes the page with
+    // "Objects are not valid as a React child", which is the underlying
+    // cause of the All-tab integrations crash users were hitting.
+    const toStr = (v: any): string => {
+      if (v === null || v === undefined) return "";
+      if (typeof v === "string") return v;
+      if (typeof v === "number" || typeof v === "boolean") return String(v);
+      // Common i18n shapes: { en: "..." } or { default: "..." } or { value: "..." }
+      if (typeof v === "object") {
+        return v.en || v.default || v.value || v.name || v.slug || v.label || "";
+      }
+      return "";
+    };
+    const toStrArr = (v: any): string[] => {
+      if (!Array.isArray(v)) return [];
+      return v.map(toStr).filter(Boolean);
+    };
     const out: ToolkitInfo[] = all.map(t => ({
-      slug: t.slug,
-      name: t.name || t.slug,
-      description: t.meta?.description || t.description || "",
-      logo: t.meta?.logo || null,
-      categories: t.meta?.categories || [],
-      authSchemes: t.auth_schemes || t.authSchemes || [],
+      slug: toStr(t.slug),
+      name: toStr(t.name) || toStr(t.slug),
+      description: toStr(t.meta?.description || t.description),
+      logo: typeof (t.meta?.logo || t.logo) === "string" ? (t.meta?.logo || t.logo) : null,
+      categories: toStrArr(t.meta?.categories || t.categories),
+      authSchemes: toStrArr(t.auth_schemes || t.authSchemes),
       noAuth: !!t.no_auth,
-    }));
+    })).filter(tk => tk.slug); // drop any entries that lack a slug entirely
     _toolkitCache = { ts: Date.now(), data: out };
     return out;
   } catch (e: any) {
