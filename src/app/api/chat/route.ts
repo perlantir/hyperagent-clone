@@ -303,6 +303,12 @@ Do not skip the planning step even if the request seems simple.`,
         try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); } catch {}
       }
       try {
+        // P43 — emit the runId immediately so the client's Stop button has a
+        // target to cancel on. Subsequent events (delta, tool_use, etc.) all
+        // belong to this run; the chat client uses runId to call
+        // /api/runs/[id]/cancel mid-stream.
+        send({ type: "started", runId });
+
         if (routerNote) send({ type: "router", chosenAgentId: routerNote.agentId, reason: routerNote.reason });
 
         let accumulatedText = "";

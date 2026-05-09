@@ -61,10 +61,19 @@ const TOOLKIT_TTL_MS = 10 * 60 * 1000;
 export async function listToolkits(userId: string | null = null): Promise<ToolkitInfo[]> {
   if (_toolkitCache && Date.now() - _toolkitCache.ts < TOOLKIT_TTL_MS) return _toolkitCache.data;
   try {
-    // v3 returns { items: [{ slug, name, meta: { description, logo, categories }, auth_schemes, ... }] }
-    const j = await composioFetch(userId, "/api/v3/toolkits?limit=200");
-    const items: any[] = j.items || [];
-    const out: ToolkitInfo[] = items.map(t => ({
+    // P43 — paginate through the full catalog (Composio caps page size at 100).
+    // The toolkit list is small enough that 5-6 pages fully loads.
+    const all: any[] = [];
+    let cursor: string | null = null;
+    for (let i = 0; i < 8; i++) {  // hard upper bound to avoid runaway loops
+      const path = `/api/v3/toolkits?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const j: any = await composioFetch(userId, path);
+      const items: any[] = j.items || [];
+      all.push(...items);
+      cursor = j.next_cursor || j.nextCursor || null;
+      if (!cursor || items.length === 0) break;
+    }
+    const out: ToolkitInfo[] = all.map(t => ({
       slug: t.slug,
       name: t.name || t.slug,
       description: t.meta?.description || t.description || "",

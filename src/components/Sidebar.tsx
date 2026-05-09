@@ -66,13 +66,28 @@ export function Sidebar() {
       ))}
 
       <SectionLabel>Threads</SectionLabel>
+      {/* P43 — group threads by recency. Today / Past week / Past month / Older.
+          Caps each group to keep the sidebar scannable; "View all" jumps to /. */}
       <div style={{ display: "flex", flexDirection: "column", gap: 1 }}>
-        {threads.slice(0, 12).map(t => (
-          <Link key={t.id} href={`/threads/${t.id}`} className="side-row" style={rowStyle(pathname === `/threads/${t.id}`, true)}>
-            {t.title}
-          </Link>
-        ))}
         {threads.length === 0 && <div style={{ padding: "6px 12px", color: "var(--text-faint)", fontSize: 12 }}>No threads yet</div>}
+        {groupThreadsByRecency(threads).map(group => (
+          <div key={group.label}>
+            <div style={{
+              padding: "8px 12px 4px", fontSize: 9.5, fontWeight: 700,
+              color: "var(--text-faint)", letterSpacing: 0.6, textTransform: "uppercase",
+            }}>{group.label}</div>
+            {group.threads.slice(0, 8).map(t => (
+              <Link key={t.id} href={`/threads/${t.id}`} className="side-row" style={rowStyle(pathname === `/threads/${t.id}`, true)}>
+                {t.title}
+              </Link>
+            ))}
+          </div>
+        ))}
+        {threads.length > 0 && (
+          <Link href="/" style={{ ...rowStyle(false), color: "var(--text-faint)", fontStyle: "italic", marginTop: 4 }}>
+            View all →
+          </Link>
+        )}
       </div>
 
       <SectionLabel>Agents</SectionLabel>
@@ -143,4 +158,25 @@ function agentBg(color: string): string {
 }
 function agentFg(color: string): string {
   return ({ orange: "#c2410c", blue: "#1d4ed8", green: "#15803d", purple: "#6d28d9" } as any)[color] || "#c2410c";
+}
+
+// P43 — bucket threads into Today / Past week / Past month / Older for the
+// sidebar render. Ordered chronologically descending within each bucket.
+function groupThreadsByRecency(threads: any[]): Array<{ label: string; threads: any[] }> {
+  const now = Date.now();
+  const day = 24 * 3600_000;
+  const buckets: Array<{ label: string; threads: any[] }> = [
+    { label: "Today",      threads: [] },
+    { label: "Past week",  threads: [] },
+    { label: "Past month", threads: [] },
+    { label: "Older",      threads: [] },
+  ];
+  for (const t of threads) {
+    const age = now - (t.updatedAt || t.createdAt || 0);
+    if (age < day) buckets[0].threads.push(t);
+    else if (age < 7 * day) buckets[1].threads.push(t);
+    else if (age < 30 * day) buckets[2].threads.push(t);
+    else buckets[3].threads.push(t);
+  }
+  return buckets.filter(b => b.threads.length > 0);
 }

@@ -37,6 +37,10 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
   // Track the last completed assistant runId so the "Run evaluation" /
   // "Give feedback" actions in RunModeMenu have a target.
   const [lastRunId, setLastRunId] = useState<string | null>(null);
+  // P43 — track the in-flight runId so the Stop button can hit
+  // /api/runs/[id]/cancel and short-circuit the loop between iterations.
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -117,9 +121,16 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
       { role: "assistant", content: "", streaming: true },
     ]);
 
+    // P43 — abort controller so the Stop button can interrupt the SSE stream
+    // on the client. We also fire a /cancel on the runId once we know it
+    // (server-side cooperative cancel between iterations).
+    abortRef.current = new AbortController();
+    setActiveRunId(null);
+
     try {
       const r = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
+        signal: abortRef.current.signal,
         body: JSON.stringify({
           threadId, content: text, useRouter: useRouter && !agentId,
           attachments: attachmentsForSend.length > 0 ? attachmentsForSend : undefined,
@@ -146,7 +157,10 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
           if (!json) continue;
           let ev: any;
           try { ev = JSON.parse(json); } catch { continue; }
-          if (ev.type === "delta") {
+          if (ev.type === "started") {
+            // P43 — capture the runId early so the Stop button can target it.
+            if (ev.runId) setActiveRunId(ev.runId);
+          } else if (ev.type === "delta") {
             assistantText += ev.text;
             setMessages(m => {
               const c = [...m];
@@ -191,9 +205,29 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
       }
       reload();
     } catch (e: any) {
-      setMessages(m => { const c = [...m]; c[c.length - 1] = { role: "assistant", content: "Error: " + e.message }; return c; });
+      // P43 — AbortController-triggered aborts surface as "AbortError" or
+      // a network failure. Don't surface those as errors — the user clicked
+      // Stop on purpose.
+      if (e.name === "AbortError" || /aborted/i.test(e.message || "")) {
+        setMessages(m => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], streaming: false, content: (c[c.length - 1].content || "") + "\n\n[Stopped]" }; return c; });
+      } else {
+        setMessages(m => { const c = [...m]; c[c.length - 1] = { role: "assistant", content: "Error: " + e.message }; return c; });
+      }
     } finally {
       setStreaming(false);
+      setActiveRunId(null);
+      abortRef.current = null;
+    }
+  }
+
+  // P43 — Stop the in-flight turn. Aborts the client-side SSE stream and
+  // fires a cooperative cancel on the server (chat loop checks
+  // isRunCancelled between iterations and exits cleanly).
+  async function stop() {
+    abortRef.current?.abort();
+    if (activeRunId) {
+      try { await fetch(`/api/runs/${activeRunId}/cancel`, { method: "POST" }); }
+      catch (e) { /* best effort */ }
     }
   }
 
@@ -288,7 +322,23 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
             <span style={{ fontSize: 11.5, color: "var(--text-faint)", padding: "5px 10px", border: "1px solid var(--border)", borderRadius: 7 }}>
               {agentId ? agents.find((a: any) => a.id === agentId)?.name || "Agent" : "Default"}
             </span>
-            <div style={{ marginLeft: "auto" }}>
+            <div style={{ marginLeft: "auto", display: "flex", gap: 6, alignItems: "center" }}>
+              {/* P43 — Stop button visible mid-stream so users can interrupt
+                  without leaving the thread. Aborts client + fires cooperative
+                  cancel server-side. */}
+              {streaming && (
+                <button onClick={stop} title="Stop the agent"
+                  style={{
+                    padding: "0 12px", fontSize: 12.5, fontWeight: 500,
+                    background: "#dc2626", color: "white",
+                    border: "none", borderRadius: 8,
+                    cursor: "pointer", height: 32,
+                    display: "flex", alignItems: "center", gap: 6,
+                  }}>
+                  <span style={{ fontSize: 11 }}>■</span>
+                  Stop
+                </button>
+              )}
               {/* P38 — run-mode menu (Plan first / Execute / actions) replaces the bare Send button */}
               <RunModeMenu
                 threadId={threadId}
