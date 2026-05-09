@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
@@ -157,6 +158,10 @@ export default function AgentPage({ params }: { params: { id: string } }) {
                 <div style={{ marginTop: 12 }}>{a.tools.map((t: string) => <span key={t} className="badge badge-gray" style={{ marginRight: 6, marginBottom: 6, padding: "4px 10px" }}>⚙ {t}</span>)}</div>
                 {a.routerHint && (<><div className="h-section" style={{ marginTop: 32 }}>Router hint</div>
                   <div style={{ marginTop: 8, color: "var(--text-muted)", fontSize: 13.5 }}>{a.routerHint}</div></>)}
+
+                {/* P35 — webhook URL + curl example */}
+                <div className="h-section" style={{ marginTop: 32 }}>Webhook</div>
+                <WebhookSection agentId={a.id} agentName={a.name} />
               </div>
               <div>
                 <div className="h-section">Color</div>
@@ -186,5 +191,69 @@ export default function AgentPage({ params }: { params: { id: string } }) {
         </div>
       </div>
     </AppShell>
+  );
+}
+
+// P35 — Webhook URL + curl example for invoking this agent via the public API.
+function WebhookSection({ agentId, agentName }: { agentId: string; agentName: string }) {
+  const [origin, setOrigin] = useState("");
+  const [copied, setCopied] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") setOrigin(window.location.origin);
+  }, []);
+
+  const url = `${origin}/api/v1/agents/${agentId}/invoke`;
+  const curl = [
+    `curl -X POST '${url}' \\`,
+    `  -H 'Authorization: Bearer hak_YOUR_KEY' \\`,
+    `  -H 'Content-Type: application/json' \\`,
+    `  -d '{"message": "Hello from ${agentName}!"}'`,
+  ].join("\n");
+
+  function copy(value: string, label: string) {
+    try {
+      navigator.clipboard.writeText(value);
+      setCopied(label);
+      setTimeout(() => setCopied(null), 1200);
+    } catch { /* ignore */ }
+  }
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 8 }}>
+        Public URL for triggering this agent. Pair with an API key from{" "}
+        <Link href="/settings" style={{ color: "var(--accent)" }}>Settings → API Keys</Link>.
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
+        <code className="mono" style={{
+          flex: 1, padding: "9px 12px",
+          background: "var(--bg-subtle)", border: "1px solid var(--border)",
+          borderRadius: 7, fontSize: 12, fontFamily: "JetBrains Mono, monospace",
+          overflow: "auto", whiteSpace: "nowrap",
+        }}>{url}</code>
+        <button className="btn" onClick={() => copy(url, "url")}
+          style={{ fontSize: 11, padding: "6px 12px" }}>
+          {copied === "url" ? "✓" : "Copy URL"}
+        </button>
+      </div>
+      <details>
+        <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+          Show curl example
+        </summary>
+        <div style={{ display: "flex", gap: 6, alignItems: "stretch", marginTop: 8 }}>
+          <pre className="mono" style={{
+            flex: 1, margin: 0, padding: "10px 12px",
+            background: "var(--bg-subtle)", border: "1px solid var(--border)",
+            borderRadius: 7, fontSize: 11.5, fontFamily: "JetBrains Mono, monospace",
+            color: "var(--text-muted)", whiteSpace: "pre", overflow: "auto",
+          }}>{curl}</pre>
+          <button className="btn" onClick={() => copy(curl, "curl")}
+            style={{ fontSize: 11, padding: "6px 12px", alignSelf: "flex-start" }}>
+            {copied === "curl" ? "✓" : "Copy"}
+          </button>
+        </div>
+      </details>
+    </div>
   );
 }

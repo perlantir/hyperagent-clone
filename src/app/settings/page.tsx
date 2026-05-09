@@ -5,6 +5,7 @@ import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { SandboxPolicyPanel } from "@/components/SandboxPolicyPanel";
+import { ApiKeysPanel } from "@/components/ApiKeysPanel";
 
 function KeyRow({ provider, status, onSave, onDelete }: {
   provider: { id: string; label: string; description: string; placeholder: string; helpUrl: string };
@@ -343,6 +344,12 @@ export default function SettingsPage() {
           <div style={{ marginBottom: 40 }}>
             <div className="h-section" style={{ marginBottom: 12 }}>Sandbox</div>
             <SandboxPolicyPanel />
+          </div>
+
+          {/* P35 — API Keys */}
+          <div style={{ marginBottom: 40 }}>
+            <div className="h-section" style={{ marginBottom: 12 }}>API Keys (public)</div>
+            <ApiKeysPanel />
           </div>
 
           {/* Theme */}

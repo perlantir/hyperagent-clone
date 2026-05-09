@@ -7,6 +7,7 @@ import { ChatView } from "@/components/ChatView";
 import { LiveblocksRoom } from "@/components/LiveblocksRoom";
 import { PresenceAvatars } from "@/components/PresenceAvatars";
 import { PlanTasks } from "@/components/PlanTasks";
+import { SaveAsAgentButton } from "@/components/SaveAsAgentButton";
 
 export default async function ThreadPage({ params }: { params: { id: string } }) {
   const user = await getCurrentUser();
@@ -24,7 +25,12 @@ export default async function ThreadPage({ params }: { params: { id: string } })
               <span style={{ color: "var(--text)", fontWeight: 500 }}>{thread.title}</span>
             </div>
           }
-          actions={<PresenceAvatars />}
+          actions={
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <SaveAsAgentButton threadId={thread.id} />
+              <PresenceAvatars />
+            </div>
+          }
         />
         <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
           {/* P24 — live Plan Tasks panel; renders nothing until the agent populates the working doc */}

@@ -1,8 +1,15 @@
-// API key management (P17). User creates and revokes their own keys.
+// API key management (P17 + P35). User creates and revokes their own keys.
+//
+// Keys are stored as SHA-256 hashes; the raw key is returned ONCE at create
+// time and never persisted. The keyPrefix lets the UI display "hak_xxx…"
+// without revealing the rest. lastUsedAt is bumped on every successful
+// authenticated call to /api/v1/chat or /api/v1/agents/{id}/invoke.
+
 import { NextResponse } from "next/server";
 import crypto from "node:crypto";
 import { getCurrentUser } from "@/lib/auth";
 import { pool } from "@/lib/db";
+import { audit, auditFromRequest } from "@/lib/audit";
 
 async function ensureKeyTable() {
   await pool().query(`
@@ -31,10 +38,18 @@ export async function POST(req: Request) {
   const id = `key_${crypto.randomBytes(8).toString("hex")}`;
   const hash = crypto.createHash("sha256").update(raw).digest("hex");
   const prefix = raw.slice(0, 12) + "…";
+  const finalName = name || "Untitled key";
   await pool().query(
     `INSERT INTO api_keys (id, "userId", name, "keyHash", "keyPrefix", "lastUsedAt", "createdAt") VALUES ($1,$2,$3,$4,$5,NULL,$6)`,
-    [id, user.id, name || "Untitled key", hash, prefix, Date.now()],
+    [id, user.id, finalName, hash, prefix, Date.now()],
   );
-  // raw key is returned ONCE — never stored in plaintext
-  return NextResponse.json({ id, name: name || "Untitled key", key: raw, keyPrefix: prefix });
+  // P35 — audit the creation. Metadata captures name + prefix so a later
+  // operator review can correlate revocations against the original create.
+  // Raw key is NEVER logged.
+  await audit({
+    userId: user.id, action: "api_key.create", resource: id,
+    result: "success", metadata: { name: finalName, keyPrefix: prefix },
+    ...auditFromRequest(req),
+  });
+  return NextResponse.json({ id, name: finalName, key: raw, keyPrefix: prefix });
 }
