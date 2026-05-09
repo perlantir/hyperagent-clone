@@ -168,9 +168,11 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   try {
     const ant = await clientForUser(userId);
     const llmStart = Date.now();
+    // P36 — per-agent model override.
+    const effectiveModel = (agent as any).modelId || DEFAULT_MODEL;
     const result = await withRetry(
       () => ant.messages.create({
-        model: DEFAULT_MODEL,
+        model: effectiveModel,
         max_tokens: 2048,
         system: systemBlocks as any,
         messages: [{ role: "user", content: message }],
@@ -190,7 +192,7 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     totalIn = result.usage?.input_tokens ?? 0;
     totalOut = result.usage?.output_tokens ?? 0;
     emitter.emit("llm_call", {
-      model: DEFAULT_MODEL,
+      model: effectiveModel,
       inputTokens: totalIn, outputTokens: totalOut,
       stopReason: result.stop_reason,
     }, { durationMs: llmDuration });

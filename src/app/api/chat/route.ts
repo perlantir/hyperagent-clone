@@ -259,8 +259,14 @@ export async function POST(req: Request) {
           }
 
           const llmStart = Date.now();
+          // P36 — per-agent model override. agents.modelId, when set, picks
+          // a specific Claude variant; otherwise we fall back to the
+          // account-default. The string is validated by Anthropic's API
+          // (we don't gate on a known list here so newly-added variants
+          // work without code changes).
+          const effectiveModel = (agent as any)?.modelId || DEFAULT_MODEL;
           const stream2 = ant.messages.stream({
-            model: DEFAULT_MODEL,
+            model: effectiveModel,
             max_tokens: 2048,
             system: systemBlocks as any, // Anthropic accepts string OR array-of-text-blocks-with-cache-control
             messages,
@@ -296,7 +302,7 @@ export async function POST(req: Request) {
           totalCacheRead += cacheRead;
           totalCacheCreate += cacheCreate;
           emitter.emit("llm_call", {
-            iter, model: DEFAULT_MODEL,
+            iter, model: effectiveModel,
             inputTokens: final.usage?.input_tokens || 0,
             outputTokens: final.usage?.output_tokens || 0,
             cacheReadTokens: cacheRead,

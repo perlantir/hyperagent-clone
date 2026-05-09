@@ -1,68 +1,115 @@
 "use client";
-import { useEffect, useState } from "react";
+// P36 — Tabbed agent builder.
+//
+// Replaces the single-form edit page with a 10-tab workspace mirroring the
+// Hyperagent reference: Config / Invocations / Integrations / Tools /
+// Skills / Knowledge / Memory / Rubrics / Library / Budget & Security.
+//
+// Right-side summary sidebar shows model + accordion-style counts and
+// links to each tab. The History panel from P28b is still reachable via
+// the kebab menu so nothing regresses.
+
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { Skeleton } from "@/components/Skeleton";
+import type { AgentLike, TabKey, TabDef } from "@/components/agent-builder/types";
+import { NATIVE_TOOL_CATALOG } from "@/components/agent-builder/types";
+import { SummarySidebar } from "@/components/agent-builder/SummarySidebar";
+import { ConfigTab } from "@/components/agent-builder/ConfigTab";
+import {
+  InvocationsTab, IntegrationsTab, ToolsTab, MemoryTab,
+  SkillsTab, KnowledgeTab, RubricsTab, LibraryTab, SecurityTab,
+} from "@/components/agent-builder/OtherTabs";
 
-interface AgentVersion {
-  id: string; agentId: string; version: number;
-  name: string; icon: string; color: string; description: string;
-  systemPrompt: string; tools: string[]; connectorIds: string[];
-  routerHint: string; createdAt: number; changedBy: string | null; changeNote: string | null;
-}
+const TABS: TabDef[] = [
+  { key: "config",       label: "Config",       icon: "⚙" },
+  { key: "invocations",  label: "Invocations",  icon: "↦" },
+  { key: "integrations", label: "Integrations", icon: "⊟" },
+  { key: "tools",        label: "Tools",        icon: "✶" },
+  { key: "skills",       label: "Skills",       icon: "◇" },
+  { key: "knowledge",    label: "Knowledge",    icon: "▤" },
+  { key: "memory",       label: "Memory",       icon: "◐" },
+  { key: "rubrics",      label: "Rubrics",      icon: "★" },
+  { key: "library",      label: "Library",      icon: "▥" },
+  { key: "security",     label: "Budget",       icon: "$" },
+];
 
-export default function AgentPage({ params }: { params: { id: string } }) {
+export default function AgentBuilderPage({ params }: { params: { id: string } }) {
   const router = useRouter();
   const toast = useToast();
   const confirm = useConfirm();
-  const [a, setA] = useState<any>(null);
-  const [editing, setEditing] = useState(false);
-  const [name, setName] = useState(""); const [description, setDescription] = useState("");
-  const [systemPrompt, setSystemPrompt] = useState(""); const [routerHint, setRouterHint] = useState("");
-  const [tools, setTools] = useState<string[]>([]);
-  const [allTools] = useState(["web_search","generate_artifact","slack_notify","slack_send_message","gmail_search","gmail_send","linear_search_issues","stripe_list_charges","github_search","airtable_list_records","notion_search","drive_search"]);
-  const [versions, setVersions] = useState<AgentVersion[]>([]);
-  const [showVersions, setShowVersions] = useState(false);
-  const [expandedVersion, setExpandedVersion] = useState<number | null>(null);
+  const [agent, setAgent] = useState<AgentLike | null>(null);
+  const [tab, setTab] = useState<TabKey>("config");
+  const [counts, setCounts] = useState({
+    invocations: 1, integrations: 0, tools: 0,
+    skills: 0, memory: 0, library: 0,
+  });
+  const [showHistory, setShowHistory] = useState(false);
+  const [versions, setVersions] = useState<any[]>([]);
+
+  const reload = useCallback(async () => {
+    const j = await fetch(`/api/agents/${params.id}`).then(r => r.json());
+    if (j.agent) setAgent(j.agent);
+  }, [params.id]);
+
+  useEffect(() => { reload(); }, [reload]);
+
+  // Pull counts in parallel for the right-sidebar accordion.
+  useEffect(() => {
+    async function load() {
+      const [skR, mR, lR] = await Promise.all([
+        fetch("/api/skills").then(r => r.json()),
+        fetch(`/api/memories?agentId=${params.id}&filter=accepted`).then(r => r.json()),
+        fetch("/api/library").then(r => r.json()),
+      ]);
+      setCounts(c => ({
+        ...c,
+        skills: (skR.skills || []).length,
+        memory: (mR.memories || []).length,
+        library: ((lR.artifacts || []).filter((a: any) => a.agentId === params.id)).length,
+      }));
+    }
+    load();
+  }, [params.id]);
+
+  useEffect(() => {
+    if (agent) {
+      setCounts(c => ({
+        ...c,
+        tools: agent.tools.length,
+        integrations: (agent.connectorIds || []).length,
+      }));
+    }
+  }, [agent]);
 
   async function loadVersions() {
     const j = await fetch(`/api/agents/${params.id}/versions`).then(r => r.json());
     setVersions(j.versions || []);
   }
 
-  useEffect(() => {
-    fetch(`/api/agents/${params.id}`).then(r => r.json()).then(j => {
-      if (!j.agent) return;
-      setA(j.agent); setName(j.agent.name); setDescription(j.agent.description);
-      setSystemPrompt(j.agent.systemPrompt); setRouterHint(j.agent.routerHint || "");
-      setTools(j.agent.tools);
-    });
-    loadVersions();
-  }, [params.id]);
-
-  async function save() {
+  async function save(patch: Partial<AgentLike>) {
     const r = await fetch(`/api/agents/${params.id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, description, systemPrompt, routerHint, tools }),
+      body: JSON.stringify(patch),
     });
-    if (!r.ok) { toast.error("Save failed", (await r.json().catch(() => ({}))).error); return; }
-    const j = await (await fetch(`/api/agents/${params.id}`)).json();
-    setA(j.agent); setEditing(false);
-    loadVersions();
-    toast.success("Agent updated", "A snapshot of the previous version was saved to history.");
+    if (r.ok) {
+      toast.success("Agent updated", "A version snapshot was saved to history.");
+      reload();
+      if (showHistory) loadVersions();
+    } else {
+      toast.error("Save failed", (await r.json().catch(() => ({}))).error);
+    }
   }
-  async function startThread() {
-    const r = await fetch("/api/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId: a.id, title: `Chat with ${a.name}` }) });
-    const j = await r.json();
-    router.push(`/threads/${j.thread.id}`);
-  }
+
   async function rollback(version: number) {
     const ok = await confirm({
       title: `Roll back to v${version}?`,
-      body: "This creates a new version capturing the rolled-back state — the rollback itself is reversible.",
+      body: "Creates a new version with the rolled-back state. Reversible.",
       confirmLabel: "Roll back",
     });
     if (!ok) return;
@@ -70,190 +117,161 @@ export default function AgentPage({ params }: { params: { id: string } }) {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ version }),
     });
-    const j = await r.json();
-    if (j.ok) {
-      // Reload everything
-      const a = await fetch(`/api/agents/${params.id}`).then(r => r.json());
-      setA(a.agent); setName(a.agent.name); setDescription(a.agent.description);
-      setSystemPrompt(a.agent.systemPrompt); setRouterHint(a.agent.routerHint || "");
-      setTools(a.agent.tools);
-      loadVersions();
-      toast.success(`Rolled back to v${version}`, `New snapshot saved as v${j.newVersion}.`);
-    } else {
-      toast.error("Rollback failed", j.error);
-    }
+    if (r.ok) { reload(); loadVersions(); toast.success(`Rolled back to v${version}`); }
+    else toast.error("Rollback failed");
   }
 
-  if (!a) return <AppShell><Topbar title="…" /></AppShell>;
-  const colorMap: any = { orange: "linear-gradient(135deg,#c2410c,#f97316)", blue: "linear-gradient(135deg,#1d4ed8,#3b82f6)", green: "linear-gradient(135deg,#15803d,#22c55e)", purple: "linear-gradient(135deg,#6d28d9,#a78bfa)" };
+  async function startThread() {
+    const r = await fetch("/api/threads", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: params.id, title: `Chat with ${agent?.name || "agent"}` }),
+    });
+    const j = await r.json();
+    router.push(`/threads/${j.thread.id}`);
+  }
+
+  if (!agent) {
+    return (
+      <AppShell>
+        <Topbar title="…" />
+        <div style={{ padding: 32, maxWidth: 1100, margin: "0 auto" }}>
+          <Skeleton width={240} height={40} style={{ marginBottom: 12 }} />
+          <Skeleton width={420} height={18} style={{ marginBottom: 24 }} />
+          <Skeleton height={400} />
+        </div>
+      </AppShell>
+    );
+  }
 
   return (
     <AppShell>
-      <Topbar breadcrumb={<div style={{ fontSize: 13, color: "var(--text-muted)" }}><a href="/agents/new">Agents</a> <span style={{ opacity: 0.4, margin: "0 8px" }}>/</span> <span style={{ color: "var(--text)", fontWeight: 500 }}>{a.name}</span></div>} />
-      <div style={{ overflowY: "auto", padding: "32px 48px" }}>
-        <div style={{ maxWidth: 1000, margin: "0 auto" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 24, paddingBottom: 24, borderBottom: "1px solid var(--border)" }}>
-            <div style={{ width: 64, height: 64, borderRadius: 14, background: colorMap[a.color] || colorMap.orange, color: "white", display: "grid", placeItems: "center", fontSize: 28, fontWeight: 700 }}>{a.icon}</div>
-            <div style={{ flex: 1 }}>
-              <h1 className="h-display" style={{ fontSize: 36 }}>{a.name}</h1>
-              <div style={{ color: "var(--text-muted)", fontSize: 14.5, maxWidth: 600 }}>{a.description}</div>
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="btn" onClick={() => { setShowVersions(!showVersions); if (!showVersions) loadVersions(); }}>
-                History {versions.length > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: "var(--text-muted)" }}>({versions.length})</span>}
+      <Topbar
+        breadcrumb={
+          <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
+            <Link href="/agents/new" style={{ color: "var(--accent)", textDecoration: "none" }}>← Create agent</Link>
+          </div>
+        }
+        actions={
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button className="btn" onClick={() => { setShowHistory(s => !s); if (!showHistory) loadVersions(); }}>
+              History {versions.length > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: "var(--text-muted)" }}>({versions.length})</span>}
+            </button>
+            <button className="btn btn-primary" onClick={startThread}>+ New thread</button>
+          </div>
+        }
+      />
+
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        {/* Main column: tabs + content */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          {/* Tabs */}
+          <div style={{
+            display: "flex", gap: 4, padding: "12px 24px 0",
+            borderBottom: "1px solid var(--border)",
+            overflowX: "auto",
+          }}>
+            {TABS.map(t => (
+              <button key={t.key} onClick={() => setTab(t.key)}
+                style={{
+                  padding: "10px 14px",
+                  border: "none", background: "transparent",
+                  fontSize: 13, fontWeight: tab === t.key ? 600 : 500,
+                  color: tab === t.key ? "var(--text)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  borderBottom: `2px solid ${tab === t.key ? "var(--text)" : "transparent"}`,
+                  marginBottom: -1,
+                  whiteSpace: "nowrap",
+                  display: "flex", alignItems: "center", gap: 6,
+                  transition: "color 0.15s",
+                }}>
+                <span style={{ fontSize: 11, opacity: 0.7 }}>{t.icon}</span>
+                {t.label}
               </button>
-              <button className="btn" onClick={() => setEditing(!editing)}>{editing ? "Cancel" : "Edit"}</button>
-              <button className="btn btn-primary" onClick={startThread}>+ New thread</button>
-            </div>
+            ))}
           </div>
 
-          {showVersions ? (
-            <div style={{ paddingTop: 32 }}>
-              <div className="h-section" style={{ marginBottom: 12 }}>Version history · {versions.length}</div>
-              {versions.length === 0 ? (
-                <div style={{ padding: 32, color: "var(--text-muted)", fontSize: 13 }}>No version snapshots yet — edit the agent to start tracking history.</div>
-              ) : (
-                <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
-                  {versions.map(v => (
-                    <div key={v.id} style={{ borderTop: "1px solid var(--border)" }}>
-                      <div onClick={() => setExpandedVersion(expandedVersion === v.version ? null : v.version)}
-                        style={{ padding: "12px 16px", cursor: "pointer", display: "flex", alignItems: "center", gap: 14 }}>
-                        <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-muted)" }}>v{v.version}</span>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v.name}</div>
-                          {v.changeNote && <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>{v.changeNote}</div>}
-                        </div>
-                        <span style={{ fontSize: 11, color: "var(--text-faint)" }}>{new Date(v.createdAt).toLocaleString()}</span>
-                        <button className="btn" style={{ fontSize: 11, padding: "4px 10px" }}
-                          onClick={(e) => { e.stopPropagation(); rollback(v.version); }}>↺ Restore</button>
-                        <span style={{ fontSize: 10, opacity: 0.5, transform: expandedVersion === v.version ? "none" : "rotate(-90deg)" }}>▾</span>
-                      </div>
-                      {expandedVersion === v.version && (
-                        <div style={{ padding: "0 16px 16px", background: "var(--bg-subtle)" }}>
-                          <div style={{ paddingTop: 12 }}>
-                            <div style={{ fontSize: 11, color: "var(--text-muted)", letterSpacing: 0.5, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Description</div>
-                            <div style={{ fontSize: 13, marginBottom: 12 }}>{v.description}</div>
-                            <div style={{ fontSize: 11, color: "var(--text-muted)", letterSpacing: 0.5, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>System prompt</div>
-                            <pre style={{ fontSize: 12, fontFamily: "JetBrains Mono, monospace", whiteSpace: "pre-wrap", color: "var(--text-muted)", margin: 0, marginBottom: 12, lineHeight: 1.55, maxHeight: 240, overflow: "auto" }}>{v.systemPrompt}</pre>
-                            <div style={{ fontSize: 11, color: "var(--text-muted)", letterSpacing: 0.5, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Tools</div>
-                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                              {v.tools.map(t => (
-                                <span key={t} className="badge badge-gray" style={{ padding: "3px 8px", fontSize: 11 }}>⚙ {t}</span>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          ) : !editing ? (
-            <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 40, paddingTop: 32 }}>
-              <div>
-                <div className="h-section">System prompt</div>
-                <div className="mono" style={{ marginTop: 12, background: "var(--bg-subtle)", padding: 18, borderRadius: 10, fontSize: 13.5, lineHeight: 1.65, color: "var(--text-muted)" }}>{a.systemPrompt}</div>
-                <div className="h-section" style={{ marginTop: 32 }}>Tools</div>
-                <div style={{ marginTop: 12 }}>{a.tools.map((t: string) => <span key={t} className="badge badge-gray" style={{ marginRight: 6, marginBottom: 6, padding: "4px 10px" }}>⚙ {t}</span>)}</div>
-                {a.routerHint && (<><div className="h-section" style={{ marginTop: 32 }}>Router hint</div>
-                  <div style={{ marginTop: 8, color: "var(--text-muted)", fontSize: 13.5 }}>{a.routerHint}</div></>)}
-
-                {/* P35 — webhook URL + curl example */}
-                <div className="h-section" style={{ marginTop: 32 }}>Webhook</div>
-                <WebhookSection agentId={a.id} agentName={a.name} />
-              </div>
-              <div>
-                <div className="h-section">Color</div>
-                <div style={{ marginTop: 8, color: "var(--text-muted)", fontSize: 13 }}>{a.color}</div>
-              </div>
-            </div>
-          ) : (
-            <div style={{ paddingTop: 32, display: "flex", flexDirection: "column", gap: 20, maxWidth: 720 }}>
-              <div><label className="h-section">Name</label><input className="input" value={name} onChange={e => setName(e.target.value)} style={{ marginTop: 8 }} /></div>
-              <div><label className="h-section">Description</label><input className="input" value={description} onChange={e => setDescription(e.target.value)} style={{ marginTop: 8 }} /></div>
-              <div><label className="h-section">System prompt</label><textarea className="input" rows={6} value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)} style={{ marginTop: 8, fontFamily: "JetBrains Mono, monospace", fontSize: 13 }} /></div>
-              <div><label className="h-section">Router hint</label><textarea className="input" rows={2} value={routerHint} onChange={e => setRouterHint(e.target.value)} style={{ marginTop: 8 }} placeholder="When should the router pick me?" /></div>
-              <div>
-                <label className="h-section">Tools</label>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                  {allTools.map(t => (
-                    <button key={t} className={`chip ${tools.includes(t) ? "active" : ""}`} onClick={() => setTools(tools.includes(t) ? tools.filter(x => x !== t) : [...tools, t])}>{t}</button>
-                  ))}
-                </div>
-              </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-                <button className="btn" onClick={() => setEditing(false)}>Cancel</button>
-                <button className="btn btn-primary" onClick={save}>Save</button>
-              </div>
-            </div>
-          )}
+          {/* Content */}
+          <div style={{ flex: 1, overflowY: "auto", padding: "32px 32px 64px" }}>
+            {showHistory ? (
+              <HistoryPanel
+                versions={versions} onRestore={rollback}
+                onClose={() => setShowHistory(false)}
+              />
+            ) : tab === "config" ? (
+              <ConfigTab agent={agent} onSave={save} />
+            ) : tab === "invocations" ? (
+              <InvocationsTab agent={agent} />
+            ) : tab === "integrations" ? (
+              <IntegrationsTab agent={agent} onSave={save} />
+            ) : tab === "tools" ? (
+              <ToolsTab agent={agent} onSave={save} />
+            ) : tab === "skills" ? (
+              <SkillsTab agent={agent} />
+            ) : tab === "knowledge" ? (
+              <KnowledgeTab />
+            ) : tab === "memory" ? (
+              <MemoryTab agent={agent} />
+            ) : tab === "rubrics" ? (
+              <RubricsTab agent={agent} />
+            ) : tab === "library" ? (
+              <LibraryTab agent={agent} />
+            ) : tab === "security" ? (
+              <SecurityTab agent={agent} onSave={save} />
+            ) : null}
+          </div>
         </div>
+
+        {/* Right summary sidebar */}
+        <SummarySidebar
+          agent={agent}
+          counts={counts}
+          onJumpToTab={(t) => { setTab(t); setShowHistory(false); }}
+        />
       </div>
     </AppShell>
   );
 }
 
-// P35 — Webhook URL + curl example for invoking this agent via the public API.
-function WebhookSection({ agentId, agentName }: { agentId: string; agentName: string }) {
-  const [origin, setOrigin] = useState("");
-  const [copied, setCopied] = useState<string | null>(null);
+// ============ History panel (P28b carryover) ============
 
-  useEffect(() => {
-    if (typeof window !== "undefined") setOrigin(window.location.origin);
-  }, []);
-
-  const url = `${origin}/api/v1/agents/${agentId}/invoke`;
-  const curl = [
-    `curl -X POST '${url}' \\`,
-    `  -H 'Authorization: Bearer hak_YOUR_KEY' \\`,
-    `  -H 'Content-Type: application/json' \\`,
-    `  -d '{"message": "Hello from ${agentName}!"}'`,
-  ].join("\n");
-
-  function copy(value: string, label: string) {
-    try {
-      navigator.clipboard.writeText(value);
-      setCopied(label);
-      setTimeout(() => setCopied(null), 1200);
-    } catch { /* ignore */ }
-  }
-
+function HistoryPanel({ versions, onRestore, onClose }: {
+  versions: any[]; onRestore: (v: number) => void; onClose: () => void;
+}) {
+  const [expanded, setExpanded] = useState<number | null>(null);
   return (
-    <div style={{ marginTop: 12 }}>
-      <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 8 }}>
-        Public URL for triggering this agent. Pair with an API key from{" "}
-        <Link href="/settings" style={{ color: "var(--accent)" }}>Settings → API Keys</Link>.
+    <div style={{ maxWidth: 880 }}>
+      <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 16 }}>
+        <h2 className="h-display" style={{ fontSize: 28 }}>Version history</h2>
+        <button className="btn" onClick={onClose} style={{ fontSize: 12 }}>Close</button>
       </div>
-      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
-        <code className="mono" style={{
-          flex: 1, padding: "9px 12px",
-          background: "var(--bg-subtle)", border: "1px solid var(--border)",
-          borderRadius: 7, fontSize: 12, fontFamily: "JetBrains Mono, monospace",
-          overflow: "auto", whiteSpace: "nowrap",
-        }}>{url}</code>
-        <button className="btn" onClick={() => copy(url, "url")}
-          style={{ fontSize: 11, padding: "6px 12px" }}>
-          {copied === "url" ? "✓" : "Copy URL"}
-        </button>
-      </div>
-      <details>
-        <summary style={{ cursor: "pointer", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
-          Show curl example
-        </summary>
-        <div style={{ display: "flex", gap: 6, alignItems: "stretch", marginTop: 8 }}>
-          <pre className="mono" style={{
-            flex: 1, margin: 0, padding: "10px 12px",
-            background: "var(--bg-subtle)", border: "1px solid var(--border)",
-            borderRadius: 7, fontSize: 11.5, fontFamily: "JetBrains Mono, monospace",
-            color: "var(--text-muted)", whiteSpace: "pre", overflow: "auto",
-          }}>{curl}</pre>
-          <button className="btn" onClick={() => copy(curl, "curl")}
-            style={{ fontSize: 11, padding: "6px 12px", alignSelf: "flex-start" }}>
-            {copied === "curl" ? "✓" : "Copy"}
-          </button>
+      {versions.length === 0 ? (
+        <div className="card" style={{ padding: 32, textAlign: "center", color: "var(--text-muted)", fontSize: 13 }}>
+          No version snapshots yet — edit the agent to start tracking history.
         </div>
-      </details>
+      ) : (
+        <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+          {versions.map((v: any) => (
+            <div key={v.id} style={{ borderTop: "1px solid var(--border)" }}>
+              <div onClick={() => setExpanded(expanded === v.version ? null : v.version)}
+                style={{ padding: "12px 16px", cursor: "pointer", display: "flex", alignItems: "center", gap: 14 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-muted)" }}>v{v.version}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 500 }}>{v.name}</div>
+                  {v.changeNote && <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>{v.changeNote}</div>}
+                </div>
+                <span style={{ fontSize: 11, color: "var(--text-faint)" }}>{new Date(v.createdAt).toLocaleString()}</span>
+                <button className="btn" onClick={(e) => { e.stopPropagation(); onRestore(v.version); }}
+                  style={{ fontSize: 11, padding: "4px 10px" }}>↺ Restore</button>
+              </div>
+              {expanded === v.version && (
+                <div style={{ padding: "0 16px 16px", background: "var(--bg-subtle)" }}>
+                  <pre style={{ fontSize: 11.5, fontFamily: "JetBrains Mono, monospace", whiteSpace: "pre-wrap", margin: "12px 0 8px", color: "var(--text-muted)", maxHeight: 240, overflow: "auto" }}>{v.systemPrompt}</pre>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

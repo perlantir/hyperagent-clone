@@ -46,6 +46,11 @@ async function initSchema() {
     -- P31 — multi-modal attachments JSON column on messages. Stores an array
     -- of { kind, name, contentType, size, dataUrl?, artifactId?, textPreview? }.
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments TEXT;
+    -- P36 — per-agent overrides for builder tabs.
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS "modelId" TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS "subagentModelId" TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS "extendedThinking" BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar TEXT;
     -- P31b — append-only artifact version history. The live artifacts row
     -- is the latest state; this table records every prior body before edits.
     CREATE TABLE IF NOT EXISTS artifact_versions (
@@ -475,7 +480,12 @@ export async function listAgents(userId: string): Promise<Agent[]> {
 export async function getAgent(id: string, userId: string): Promise<Agent | null> {
   const row = await qOne<any>(`SELECT * FROM agents WHERE id=$1 AND "userId"=$2`, [id, userId]);
   if (!row) return null;
-  return { ...row, tools: JSON.parse(row.tools), connectorIds: JSON.parse(row.connectorIds || "[]") };
+  return {
+    ...row,
+    tools: JSON.parse(row.tools),
+    connectorIds: JSON.parse(row.connectorIds || "[]"),
+    extendedThinking: !!row.extendedThinking,
+  };
 }
 export async function createAgent(a: Omit<Agent,"id"|"createdAt"> & { projectId?: string | null; connectorIds?: string[]; routerHint?: string }): Promise<Agent> {
   const id = uid("a"); const createdAt = Date.now();
@@ -490,9 +500,23 @@ export async function createAgent(a: Omit<Agent,"id"|"createdAt"> & { projectId?
 export async function updateAgent(id: string, userId: string, fields: Partial<Omit<Agent,"id"|"userId"|"createdAt">>) {
   const cur = await getAgent(id, userId); if (!cur) return;
   const n = { ...cur, ...fields };
-  await q(`UPDATE agents SET "projectId"=$1,name=$2,icon=$3,color=$4,description=$5,"systemPrompt"=$6,tools=$7,"connectorIds"=$8,"routerHint"=$9 WHERE id=$10 AND "userId"=$11`,
-    [n.projectId, n.name, n.icon, n.color, n.description, n.systemPrompt,
-     JSON.stringify(n.tools), JSON.stringify(n.connectorIds), n.routerHint, id, userId]);
+  // P36 — extended fields written in the same UPDATE so a single PATCH
+  // covers builder edits across every tab.
+  await q(
+    `UPDATE agents SET
+       "projectId"=$1, name=$2, icon=$3, color=$4, description=$5,
+       "systemPrompt"=$6, tools=$7, "connectorIds"=$8, "routerHint"=$9,
+       "modelId"=$10, "subagentModelId"=$11, "extendedThinking"=$12,
+       "maxRunBudgetCredits"=$13, avatar=$14
+     WHERE id=$15 AND "userId"=$16`,
+    [
+      n.projectId, n.name, n.icon, n.color, n.description, n.systemPrompt,
+      JSON.stringify(n.tools), JSON.stringify(n.connectorIds), n.routerHint,
+      n.modelId ?? null, n.subagentModelId ?? null, !!n.extendedThinking,
+      n.maxRunBudgetCredits ?? null, n.avatar ?? null,
+      id, userId,
+    ],
+  );
 }
 export async function deleteAgent(id: string, userId: string) {
   await q(`DELETE FROM agents WHERE id=$1 AND "userId"=$2`, [id, userId]);

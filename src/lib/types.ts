@@ -89,6 +89,12 @@ export interface Agent {
   tools: string[];
   connectorIds: string[];
   routerHint: string;
+  // P36 — per-agent overrides surfaced in the new tabbed builder.
+  modelId?: string | null;             // null = use account default (settings)
+  subagentModelId?: string | null;     // model dispatched-subagents use; null = Sonnet
+  extendedThinking?: boolean;          // toggle for Anthropic extended thinking
+  maxRunBudgetCredits?: number | null; // per-run budget cap override
+  avatar?: string | null;              // optional avatar URL
   createdAt: number;
 }
 
