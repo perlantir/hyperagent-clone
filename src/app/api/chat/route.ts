@@ -106,8 +106,24 @@ export async function POST(req: Request) {
   // P25 — three-tier memory retrieval: T1 (pinned + importance≥8 always-present)
   // and T2 (top-K cosine match against the user's current message). T3 is
   // the search_knowledge tool which the agent calls explicitly when needed.
+  // P42 — resolve @-references in the user's message so picker tokens
+  // (@memory:id, @artifact:id, @skill:id, @asset:id, @integration:slug)
+  // expand into actual content + scope tool selection.
+  let resolvedContent = content || "";
+  let resolvedExpansions: any[] = [];
+  if (content && content.includes("@")) {
+    try {
+      const { resolveReferences } = await import("@/lib/at-references");
+      const r = await resolveReferences(content, { userId: user.id, threadId });
+      resolvedContent = r.resolvedText;
+      resolvedExpansions = r.expansions;
+    } catch (e) {
+      console.error("[at-references]", e);
+    }
+  }
+
   const { pinned: pinnedMemories, contextual: contextualMemories } =
-    await retrieveMemoriesForChat(user.id, agent?.id ?? null, thread.projectId, content);
+    await retrieveMemoriesForChat(user.id, agent?.id ?? null, thread.projectId, resolvedContent);
 
   // P40 — Knowledge retrieval. Fetch top-K most-similar chunks from the
   // agent's uploaded documents. Skipped when no agent is bound (knowledge
@@ -171,15 +187,38 @@ Do not skip the planning step even if the request seems simple.`,
   const allMsgs = await listMessages(threadId);
   const anthropicMessages: any[] = [];
   let totalImageAttachments = 0;
-  for (const m of allMsgs) {
+  for (let i = 0; i < allMsgs.length; i++) {
+    const m = allMsgs[i];
     if (m.role === "user") {
-      anthropicMessages.push({ role: "user", content: buildUserContentBlocks(m.content, m.attachments) });
+      // P42 — for the LATEST user message (just-stored) inject resolved
+      // expansions and replace tokens with their inline labels. Older
+      // messages keep the literal token text since we don't preserve
+      // expansions across turns (the model re-reads context each turn).
+      const isLatest = i === allMsgs.length - 1;
+      let messageText = m.content;
+      if (isLatest && resolvedExpansions.length > 0) {
+        const { formatExpansions } = await import("@/lib/at-references");
+        const expansionBlock = formatExpansions(resolvedExpansions);
+        if (expansionBlock) {
+          messageText = `${expansionBlock}\n\n${resolvedContent}`;
+        } else {
+          messageText = resolvedContent;
+        }
+      }
+      anthropicMessages.push({ role: "user", content: buildUserContentBlocks(messageText, m.attachments) });
       for (const a of (m.attachments || [])) if (a.kind === "image") totalImageAttachments++;
     } else if (m.role === "assistant" && m.content) {
       anthropicMessages.push({ role: "assistant", content: m.content });
     }
   }
   // Last message in DB is the user message we just stored — anthropicMessages already includes it.
+
+  // P42 — emit a trace event so resolution is visible in /traces/[id].
+  // Goes after emitter is created below; we save the data here and emit.
+  const _atRefsForTrace = resolvedExpansions.length > 0 ? {
+    count: resolvedExpansions.length,
+    kinds: Array.from(new Set(resolvedExpansions.map((r: any) => r.kind))),
+  } : null;
 
   // Create the assistant message shell that we'll accumulate into.
   const assistantMsg = await createMessage({ threadId, role: "assistant", content: "" });
@@ -232,6 +271,14 @@ Do not skip the planning step even if the request seems simple.`,
     pinnedCount: pinnedMemories.length,
     contextualCount: contextualMemories.length,
   });
+  // P42 — surface @-reference resolution in the trace.
+  if (_atRefsForTrace) {
+    emitter.emit("memory_read", {
+      count: _atRefsForTrace.count,
+      kind: "at_references",
+      kinds: _atRefsForTrace.kinds,
+    });
+  }
   // P31 — log multi-modal context. Image-input tokens flow through
   // Anthropic's usage.input_tokens automatically, so no extra accounting
   // is needed; this emit is purely for trace visibility.

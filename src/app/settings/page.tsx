@@ -1,80 +1,44 @@
 "use client";
-import { useEffect, useState } from "react";
+// P42 — Restructured Settings page with left-nav.
+//
+// Mirrors Hyperagent's settings layout:
+//   left nav (12 sections) | right pane (active section content)
+//
+// Sections are deep-linkable via URL hash (#profile / #api-keys / etc).
+// Existing legacy panels (API Keys, Sandbox Policy) are mounted as-is;
+// new sections (Profile, Personalization, Notifications, Security,
+// Referrals) come from src/components/settings/NewSections.tsx.
+
+import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { SandboxPolicyPanel } from "@/components/SandboxPolicyPanel";
 import { ApiKeysPanel } from "@/components/ApiKeysPanel";
+import { SettingsNav, SETTINGS_SECTIONS } from "@/components/settings/SettingsNav";
+import {
+  ProfileSection, PersonalizationSection, NotificationsSection,
+  SecuritySection, ReferralsSection,
+  IntegrationsLinkSection, BillingLinkSection,
+} from "@/components/settings/NewSections";
 
-function KeyRow({ provider, status, onSave, onDelete }: {
-  provider: { id: string; label: string; description: string; placeholder: string; helpUrl: string };
-  status: "user" | "platform" | "missing";
-  onSave: (v: string) => void;
-  onDelete: () => void;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState("");
-  const badge = status === "user"
-    ? { text: "Your key", color: "var(--green)", bg: "rgba(34,197,94,0.1)" }
-    : status === "platform"
-      ? { text: "Platform default", color: "var(--text-muted)", bg: "var(--bg-elevated)" }
-      : { text: "Not configured", color: "#dc2626", bg: "rgba(220,38,38,0.08)" };
-  return (
-    <div className="card" style={{ padding: 16 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <div style={{ flex: 1, minWidth: 200 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>{provider.label}</div>
-            <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 8px", borderRadius: 99, color: badge.color, background: badge.bg }}>
-              {badge.text}
-            </span>
-          </div>
-          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3 }}>{provider.description}</div>
-          <a href={provider.helpUrl} target="_blank" rel="noopener noreferrer"
-            style={{ fontSize: 11.5, color: "var(--accent)", textDecoration: "none" }}>
-            Get a key →
-          </a>
-        </div>
-        <div style={{ display: "flex", gap: 6 }}>
-          {status === "user" && !editing && (
-            <button className="btn" onClick={onDelete} style={{ fontSize: 12, padding: "6px 12px" }}>Remove</button>
-          )}
-          {!editing && (
-            <button className="btn btn-primary" onClick={() => setEditing(true)} style={{ fontSize: 12, padding: "6px 12px" }}>
-              {status === "user" ? "Replace" : "Set key"}
-            </button>
-          )}
-        </div>
-      </div>
-      {editing && (
-        <div style={{ marginTop: 12, display: "flex", gap: 6 }}>
-          <input
-            type="password" autoFocus
-            placeholder={provider.placeholder}
-            value={value}
-            onChange={e => setValue(e.target.value)}
-            onKeyDown={e => { if (e.key === "Escape") { setEditing(false); setValue(""); } }}
-            style={{
-              flex: 1, padding: "8px 10px", borderRadius: 6,
-              border: "1px solid var(--border)", background: "var(--bg)",
-              color: "var(--text)", fontSize: 13, fontFamily: "monospace",
-            }}
-          />
-          <button className="btn btn-primary"
-            onClick={() => { if (value.trim().length >= 4) { onSave(value.trim()); setEditing(false); setValue(""); } }}
-            style={{ fontSize: 12, padding: "8px 14px" }}>Save</button>
-          <button className="btn" onClick={() => { setEditing(false); setValue(""); }}
-            style={{ fontSize: 12, padding: "8px 12px" }}>Cancel</button>
-        </div>
-      )}
-    </div>
-  );
-}
+const SECTION_HEADER: React.CSSProperties = {
+  fontFamily: "Instrument Serif, serif",
+  fontSize: 32, fontWeight: 400, lineHeight: 1.1,
+  marginBottom: 6,
+};
+const SECTION_LEAD: React.CSSProperties = {
+  fontSize: 14, color: "var(--text-muted)",
+  marginBottom: 28, maxWidth: 600, lineHeight: 1.5,
+};
 
 export default function SettingsPage() {
   const toast = useToast();
   const confirm = useConfirm();
+
+  const [active, setActive] = useState<string>("profile");
   const [me, setMe] = useState<any>(null);
   const [prefs, setPrefs] = useState<any>({});
   const [models, setModels] = useState<any[]>([]);
@@ -85,11 +49,31 @@ export default function SettingsPage() {
   const [secretStatus, setSecretStatus] = useState<Record<string, "user" | "platform" | "missing">>({});
   const [slackWorkspaces, setSlackWorkspaces] = useState<any[]>([]);
   const [agents, setAgents] = useState<any[]>([]);
+  const [connectorCount, setConnectorCount] = useState(0);
+  const [balance, setBalance] = useState(0);
   const [slackForm, setSlackForm] = useState({ teamId: "", botToken: "", agentId: "" });
   const [slackSaving, setSlackSaving] = useState(false);
   const [slackError, setSlackError] = useState("");
 
-  async function reload() {
+  // Hydrate active section from URL hash.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const fromHash = window.location.hash.replace("#", "");
+    if (fromHash && SETTINGS_SECTIONS.some(s => s.id === fromHash)) setActive(fromHash);
+    function onHashChange() {
+      const h = window.location.hash.replace("#", "");
+      if (h && SETTINGS_SECTIONS.some(s => s.id === h)) setActive(h);
+    }
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
+
+  function selectSection(id: string) {
+    setActive(id);
+    if (typeof window !== "undefined") history.replaceState(null, "", `#${id}`);
+  }
+
+  const reload = useCallback(async () => {
     const meR = await (await fetch("/api/auth/me")).json();
     setMe(meR.user);
     const r = await (await fetch("/api/settings")).json();
@@ -104,8 +88,11 @@ export default function SettingsPage() {
     setSlackWorkspaces(sw.workspaces || []);
     const ag = await (await fetch("/api/agents")).json();
     setAgents(ag.agents || []);
-  }
-  useEffect(() => { reload(); }, []);
+    fetch("/api/connectors").then(r => r.json()).then(j =>
+      setConnectorCount((j.connectors || []).filter((c: any) => c.connected).length));
+    fetch("/api/credits").then(r => r.json()).then(j => setBalance(j.balance || 0));
+  }, []);
+  useEffect(() => { reload(); }, [reload]);
 
   async function saveSlackWorkspace() {
     setSlackSaving(true); setSlackError("");
@@ -114,12 +101,8 @@ export default function SettingsPage() {
       body: JSON.stringify(slackForm),
     });
     setSlackSaving(false);
-    if (r.ok) {
-      setSlackForm({ teamId: "", botToken: "", agentId: "" });
-      reload();
-    } else {
-      setSlackError((await r.json()).error || "Failed");
-    }
+    if (r.ok) { setSlackForm({ teamId: "", botToken: "", agentId: "" }); reload(); }
+    else setSlackError((await r.json()).error || "Failed");
   }
   async function deleteSlackWorkspace(teamId: string) {
     const ok = await confirm({
@@ -146,8 +129,7 @@ export default function SettingsPage() {
     const ok = await confirm({
       title: `Remove your ${providerId} key?`,
       body: "Calls will fall back to the platform default.",
-      confirmLabel: "Remove key",
-      variant: "destructive",
+      confirmLabel: "Remove key", variant: "destructive",
     });
     if (!ok) return;
     const r = await fetch("/api/settings/secrets/" + providerId, { method: "DELETE" });
@@ -156,8 +138,7 @@ export default function SettingsPage() {
 
   async function save(patch: Record<string, any>) {
     setSaving(true); setSaved(false);
-    const newPrefs = { ...prefs, ...patch };
-    setPrefs(newPrefs);
+    setPrefs({ ...prefs, ...patch });
     await fetch("/api/settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
     setSaving(false); setSaved(true);
     setTimeout(() => setSaved(false), 1500);
@@ -184,187 +165,252 @@ export default function SettingsPage() {
     { id: "openai", label: "OpenAI Sora", desc: "Higher fidelity, slower" },
   ];
 
-  function Picker({ title, subtitle, options, prefKey }: { title: string; subtitle: string; options: any[]; prefKey: string }) {
-    const current = prefs[prefKey] || options[0]?.id;
-    return (
-      <div style={{ marginBottom: 32 }}>
-        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{title}</div>
-        <div style={{ fontSize: 12.5, color: "var(--text-muted)", marginBottom: 12 }}>{subtitle}</div>
-        <div style={{ display: "grid", gridTemplateColumns: `repeat(${options.length}, 1fr)`, gap: 8 }}>
-          {options.map((o: any) => (
-            <button key={o.id} onClick={() => save({ [prefKey]: o.id })}
-              className="card"
-              style={{ padding: 12, textAlign: "left", cursor: "pointer", borderColor: current === o.id ? "var(--accent)" : "var(--border)", borderWidth: 2 }}>
-              <div style={{ fontSize: 13.5, fontWeight: 600 }}>{o.label}</div>
-              <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>{o.desc}</div>
-            </button>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
   return (
     <AppShell>
       <Topbar title="Settings" />
-      <div style={{ overflowY: "auto", padding: "32px 48px" }}>
-        <div style={{ maxWidth: 760, margin: "0 auto" }}>
-          <h1 className="h-display" style={{ fontSize: 44, marginBottom: 8 }}>Settings</h1>
-          <div style={{ color: "var(--text-muted)", fontSize: 15, marginBottom: 32 }}>Account, model, and the providers your agents use for chat + media.</div>
+      <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        <SettingsNav active={active} onSelect={selectSection} />
+        <div style={{ flex: 1, overflowY: "auto", padding: "32px 48px 64px" }}>
+          <div style={{ maxWidth: 800, margin: "0 auto" }}>
 
-          {/* Account */}
-          <div style={{ marginBottom: 40 }}>
-            <div className="h-section" style={{ marginBottom: 12 }}>Account</div>
-            <div className="card" style={{ padding: 20 }}>
-              <div style={{ fontSize: 14 }}><strong>{me?.name}</strong></div>
-              <div style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 2 }}>{me?.email}</div>
-            </div>
-          </div>
+            {active === "profile" && me && (
+              <ProfileSection user={me} onUpdate={reload} />
+            )}
 
-          {/* API Keys */}
-          <div style={{ marginBottom: 40 }}>
-            <div className="h-section" style={{ marginBottom: 12 }}>API Keys</div>
-            <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 16 }}>
-              Bring your own keys for any provider. Stored encrypted (AES-256-GCM) in your account.
-              Each provider falls back to the platform default if you don't set one.
-            </div>
-            <div style={{ display: "grid", gap: 8 }}>
-              {secretProviders.map((p: any) => (
-                <KeyRow key={p.id} provider={p}
-                  status={secretStatus[p.id] || "missing"}
-                  onSave={v => saveSecret(p.id, v)}
-                  onDelete={() => deleteSecret(p.id)} />
-              ))}
-            </div>
-          </div>
+            {active === "personalization" && (
+              <PersonalizationSection prefs={prefs} onSave={save} />
+            )}
 
-          {/* Slack Workspaces */}
-          <div style={{ marginBottom: 40 }}>
-            <div className="h-section" style={{ marginBottom: 12 }}>Slack Workspaces</div>
-            <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 12 }}>
-              Connect a Slack workspace so an agent can reply to messages and mentions in real time.
-              Set up a Slack app at <a href="https://api.slack.com/apps" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>api.slack.com/apps</a>,
-              configure the Events URL to <code>{typeof window !== "undefined" ? window.location.origin : ""}/api/slack/events</code>,
-              and paste the bot token (xoxb-…) here.
-            </div>
-            {slackWorkspaces.length > 0 && (
-              <div style={{ marginBottom: 16, display: "grid", gap: 6 }}>
-                {slackWorkspaces.map((w: any) => (
-                  <div key={w.teamId} className="card" style={{ padding: 12, display: "flex", alignItems: "center", gap: 12 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600 }}>{w.teamId}</div>
-                      <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
-                        Token {w.botTokenRedacted} · {w.agentId
-                          ? <>responds as <strong>{agents.find((a:any) => a.id === w.agentId)?.name || w.agentId}</strong></>
-                          : <em>no agent bound — won't respond yet</em>}
+            {active === "integrations" && (
+              <IntegrationsLinkSection count={connectorCount} />
+            )}
+
+            {active === "models" && (
+              <div>
+                <h2 style={SECTION_HEADER}>Models</h2>
+                <p style={SECTION_LEAD}>Default LLM and media providers used by your agents and tools when an agent doesn't override.</p>
+
+                <h3 className="h-section" style={{ marginBottom: 12 }}>Chat model</h3>
+                <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 14 }}>The LLM that powers chat conversations and tool routing.</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 16 }}>
+                  {providers.map(p => (
+                    <button key={p.id} onClick={() => setProvider(p.id)} className="card"
+                      style={{ padding: 14, textAlign: "left", cursor: "pointer", borderColor: provider === p.id ? "var(--accent)" : "var(--border)", borderWidth: 2 }}>
+                      <div style={{ fontSize: 14, fontWeight: 600 }}>{p.label}</div>
+                      <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>{p.desc}</div>
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6, marginBottom: 32 }}>
+                  {providerModels.map(m => (
+                    <button key={m.id} onClick={() => save({ modelId: m.id })} className="card"
+                      style={{ padding: 14, textAlign: "left", cursor: "pointer", display: "flex", alignItems: "center", gap: 12, borderColor: prefs.modelId === m.id ? "var(--accent)" : "var(--border)", borderWidth: 2 }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: 14, fontWeight: 600 }}>{m.label}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                          {m.contextWindow.toLocaleString()} ctx · ${m.inputPer1k}/1k in · ${m.outputPer1k}/1k out
+                        </div>
                       </div>
-                    </div>
-                    <button className="btn" onClick={() => deleteSlackWorkspace(w.teamId)}
-                      style={{ fontSize: 12, padding: "6px 12px" }}>Disconnect</button>
-                  </div>
-                ))}
+                      {prefs.modelId === m.id && <span className="badge badge-accent">Active</span>}
+                    </button>
+                  ))}
+                </div>
+
+                <h3 className="h-section" style={{ marginBottom: 12 }}>Media generation</h3>
+                <Picker title="Image"  subtitle="Used by generate_image"  options={imageProviders}  prefKey="imageProvider"  prefs={prefs} save={save} />
+                <Picker title="Speech" subtitle="Used by generate_speech" options={speechProviders} prefKey="speechProvider" prefs={prefs} save={save} />
+                <Picker title="Video"  subtitle="Used by generate_video"  options={videoProviders}  prefKey="videoProvider"  prefs={prefs} save={save} />
+                {saving && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>Saving…</div>}
+                {saved && <div style={{ marginTop: 8, fontSize: 12, color: "var(--green)" }}>✓ Saved</div>}
               </div>
             )}
-            <div className="card" style={{ padding: 16 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Connect a workspace</div>
-              <div style={{ display: "grid", gap: 8 }}>
-                <input
-                  placeholder="Team ID (T01ABCXYZ — find at api.slack.com/methods/auth.test/test)"
-                  value={slackForm.teamId}
-                  onChange={e => setSlackForm({ ...slackForm, teamId: e.target.value.trim() })}
-                  style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, fontFamily: "monospace" }}
-                />
-                <input type="password"
-                  placeholder="Bot token (xoxb-…)"
-                  value={slackForm.botToken}
-                  onChange={e => setSlackForm({ ...slackForm, botToken: e.target.value.trim() })}
-                  style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, fontFamily: "monospace" }}
-                />
-                <select value={slackForm.agentId}
-                  onChange={e => setSlackForm({ ...slackForm, agentId: e.target.value })}
-                  style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13 }}>
-                  <option value="">— Pick an agent to respond as —</option>
-                  {agents.map((a: any) => <option key={a.id} value={a.id}>{a.name}</option>)}
-                </select>
-                {slackError && <div style={{ fontSize: 12, color: "#dc2626" }}>{slackError}</div>}
-                <button className="btn btn-primary" onClick={saveSlackWorkspace}
-                  disabled={!slackForm.teamId || !slackForm.botToken || slackSaving}
-                  style={{ fontSize: 12, padding: "8px 14px", justifyContent: "center" }}>
-                  {slackSaving ? "Verifying token…" : "Connect workspace"}
-                </button>
+
+            {active === "api-keys" && (
+              <div>
+                <h2 style={SECTION_HEADER}>API Keys</h2>
+                <p style={SECTION_LEAD}>Public <code className="mono">hak_</code> tokens for the API + bring-your-own-key for LLM and media providers.</p>
+
+                <h3 className="h-section" style={{ marginBottom: 12, marginTop: 24 }}>Public API keys</h3>
+                <ApiKeysPanel />
+
+                <h3 className="h-section" style={{ marginTop: 32, marginBottom: 12 }}>Provider keys (BYOK)</h3>
+                <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 16 }}>
+                  Bring your own keys for any provider. Stored encrypted (AES-256-GCM). Each provider falls back to the platform default if you don't set one.
+                </div>
+                <div style={{ display: "grid", gap: 8 }}>
+                  {secretProviders.map((p: any) => (
+                    <KeyRow key={p.id} provider={p}
+                      status={secretStatus[p.id] || "missing"}
+                      onSave={v => saveSecret(p.id, v)}
+                      onDelete={() => deleteSecret(p.id)} />
+                  ))}
+                </div>
               </div>
-            </div>
-          </div>
+            )}
 
-          {/* Chat model */}
-          <div style={{ marginBottom: 40 }}>
-            <div className="h-section" style={{ marginBottom: 12 }}>Chat Model</div>
-            <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 16 }}>The LLM that powers chat conversations and tool routing.</div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 16 }}>
-              {providers.map(p => (
-                <button key={p.id} onClick={() => setProvider(p.id)}
-                  className="card"
-                  style={{ padding: 14, textAlign: "left", cursor: "pointer", borderColor: provider === p.id ? "var(--accent)" : "var(--border)", borderWidth: 2 }}>
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>{p.label}</div>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>{p.desc}</div>
-                </button>
-              ))}
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
-              {providerModels.map(m => (
-                <button key={m.id} onClick={() => save({ modelId: m.id })}
-                  className="card"
-                  style={{ padding: 14, textAlign: "left", cursor: "pointer", display: "flex", alignItems: "center", gap: 12, borderColor: prefs.modelId === m.id ? "var(--accent)" : "var(--border)", borderWidth: 2 }}>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 14, fontWeight: 600 }}>{m.label}</div>
-                    <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
-                      {m.contextWindow.toLocaleString()} ctx · ${m.inputPer1k}/1k in · ${m.outputPer1k}/1k out
-                    </div>
+            {active === "sandbox" && (
+              <div>
+                <h2 style={SECTION_HEADER}>Sandbox</h2>
+                <p style={SECTION_LEAD}>Static guardrails on sandboxed code execution. Domain allowlist + concurrency cap.</p>
+                <SandboxPolicyPanel />
+              </div>
+            )}
+
+            {active === "slack" && (
+              <div>
+                <h2 style={SECTION_HEADER}>Slack workspaces</h2>
+                <p style={SECTION_LEAD}>Connect a Slack workspace so an agent can reply to messages and mentions in real time.</p>
+
+                <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 16, lineHeight: 1.55 }}>
+                  Set up a Slack app at <a href="https://api.slack.com/apps" target="_blank" rel="noopener noreferrer" style={{ color: "var(--accent)" }}>api.slack.com/apps</a>,
+                  configure the Events URL to <code>{typeof window !== "undefined" ? window.location.origin : ""}/api/slack/events</code>,
+                  and paste the bot token (xoxb-…) here.
+                </div>
+                {slackWorkspaces.length > 0 && (
+                  <div style={{ marginBottom: 16, display: "grid", gap: 6 }}>
+                    {slackWorkspaces.map((w: any) => (
+                      <div key={w.teamId} className="card" style={{ padding: 12, display: "flex", alignItems: "center", gap: 12 }}>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 600 }}>{w.teamId}</div>
+                          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                            Token {w.botTokenRedacted} · {w.agentId
+                              ? <>responds as <strong>{agents.find((a:any) => a.id === w.agentId)?.name || w.agentId}</strong></>
+                              : <em>no agent bound — won't respond yet</em>}
+                          </div>
+                        </div>
+                        <button className="btn" onClick={() => deleteSlackWorkspace(w.teamId)}
+                          style={{ fontSize: 12, padding: "6px 12px" }}>Disconnect</button>
+                      </div>
+                    ))}
                   </div>
-                  {prefs.modelId === m.id && <span className="badge badge-accent">Active</span>}
-                </button>
-              ))}
-            </div>
-          </div>
+                )}
+                <div className="card" style={{ padding: 16 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Connect a workspace</div>
+                  <div style={{ display: "grid", gap: 8 }}>
+                    <input placeholder="Team ID (T01ABCXYZ)"
+                      value={slackForm.teamId}
+                      onChange={e => setSlackForm({ ...slackForm, teamId: e.target.value.trim() })}
+                      style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, fontFamily: "monospace" }} />
+                    <input type="password" placeholder="Bot token (xoxb-…)"
+                      value={slackForm.botToken}
+                      onChange={e => setSlackForm({ ...slackForm, botToken: e.target.value.trim() })}
+                      style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13, fontFamily: "monospace" }} />
+                    <select value={slackForm.agentId} onChange={e => setSlackForm({ ...slackForm, agentId: e.target.value })}
+                      style={{ padding: "8px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 13 }}>
+                      <option value="">— Pick an agent to respond as —</option>
+                      {agents.map((a: any) => <option key={a.id} value={a.id}>{a.name}</option>)}
+                    </select>
+                    {slackError && <div style={{ fontSize: 12, color: "#dc2626" }}>{slackError}</div>}
+                    <button className="btn btn-primary" onClick={saveSlackWorkspace}
+                      disabled={!slackForm.teamId || !slackForm.botToken || slackSaving}
+                      style={{ fontSize: 12, padding: "8px 14px", justifyContent: "center" }}>
+                      {slackSaving ? "Verifying token…" : "Connect workspace"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
-          {/* Media providers */}
-          <div style={{ marginBottom: 40 }}>
-            <div className="h-section" style={{ marginBottom: 12 }}>Media Generation</div>
-            <Picker title="Image"  subtitle="Used by the generate_image tool"  options={imageProviders}  prefKey="imageProvider" />
-            <Picker title="Speech" subtitle="Used by the generate_speech tool" options={speechProviders} prefKey="speechProvider" />
-            <Picker title="Video"  subtitle="Used by the generate_video tool"  options={videoProviders}  prefKey="videoProvider" />
-            <div style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 4 }}>
-              Configure provider keys in <strong>API Keys</strong> above (or the platform falls back to its own default).
-            </div>
-            {saving && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>Saving…</div>}
-            {saved && <div style={{ marginTop: 8, fontSize: 12, color: "var(--green)" }}>✓ Saved</div>}
-          </div>
+            {active === "notifications" && <NotificationsSection />}
+            {active === "security" && <SecuritySection />}
+            {active === "billing" && <BillingLinkSection balance={balance} />}
+            {active === "referrals" && <ReferralsSection />}
 
-          {/* P34 — Sandbox policy */}
-          <div style={{ marginBottom: 40 }}>
-            <div className="h-section" style={{ marginBottom: 12 }}>Sandbox</div>
-            <SandboxPolicyPanel />
-          </div>
+            {active === "theme" && (
+              <div>
+                <h2 style={SECTION_HEADER}>Theme</h2>
+                <p style={SECTION_LEAD}>Choose your interface mode.</p>
+                <div className="card" style={{ padding: 16, maxWidth: 400 }}>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {["light","dark"].map(t => (
+                      <button key={t}
+                        onClick={() => { document.documentElement.setAttribute("data-theme", t); try { localStorage.setItem("hyperagent-theme", t); } catch {} save({ theme: t }); }}
+                        className={`chip ${prefs.theme === t ? "active" : ""}`}>
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
 
-          {/* P35 — API Keys */}
-          <div style={{ marginBottom: 40 }}>
-            <div className="h-section" style={{ marginBottom: 12 }}>API Keys (public)</div>
-            <ApiKeysPanel />
-          </div>
-
-          {/* Theme */}
-          <div style={{ marginBottom: 40 }}>
-            <div className="h-section" style={{ marginBottom: 12 }}>Theme</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              {["light","dark"].map(t => (
-                <button key={t}
-                  onClick={() => { document.documentElement.setAttribute("data-theme", t); try { localStorage.setItem("hyperagent-theme", t); } catch {} save({ theme: t }); }}
-                  className={`chip ${prefs.theme === t ? "active" : ""}`}>{t}</button>
-              ))}
-            </div>
           </div>
         </div>
       </div>
     </AppShell>
+  );
+}
+
+function Picker({ title, subtitle, options, prefKey, prefs, save }: {
+  title: string; subtitle: string; options: any[]; prefKey: string;
+  prefs: any; save: (patch: Record<string, any>) => void;
+}) {
+  const current = prefs[prefKey] || options[0]?.id;
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>{title}</div>
+      <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 8 }}>{subtitle}</div>
+      <div style={{ display: "grid", gridTemplateColumns: `repeat(${options.length}, 1fr)`, gap: 8 }}>
+        {options.map((o: any) => (
+          <button key={o.id} onClick={() => save({ [prefKey]: o.id })} className="card"
+            style={{ padding: 12, textAlign: "left", cursor: "pointer", borderColor: current === o.id ? "var(--accent)" : "var(--border)", borderWidth: 2 }}>
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{o.label}</div>
+            <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>{o.desc}</div>
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function KeyRow({ provider, status, onSave, onDelete }: {
+  provider: { id: string; label: string; description: string; placeholder: string; helpUrl: string };
+  status: "user" | "platform" | "missing";
+  onSave: (v: string) => void;
+  onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const badge = status === "user"
+    ? { text: "Your key", color: "var(--green)", bg: "rgba(34,197,94,0.1)" }
+    : status === "platform"
+      ? { text: "Platform default", color: "var(--text-muted)", bg: "var(--bg-elevated)" }
+      : { text: "Not configured", color: "#dc2626", bg: "rgba(220,38,38,0.08)" };
+  return (
+    <div className="card" style={{ padding: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>{provider.label}</div>
+            <span style={{ fontSize: 10.5, fontWeight: 600, padding: "2px 8px", borderRadius: 99, color: badge.color, background: badge.bg }}>
+              {badge.text}
+            </span>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 3 }}>{provider.description}</div>
+          <a href={provider.helpUrl} target="_blank" rel="noopener noreferrer"
+            style={{ fontSize: 11, color: "var(--accent)", marginTop: 4, display: "inline-block" }}>
+            Get a key →
+          </a>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {!editing ? (
+            <button className="btn" onClick={() => setEditing(true)} style={{ fontSize: 12, padding: "5px 10px" }}>
+              {status === "user" ? "Replace" : "Add"}
+            </button>
+          ) : (
+            <>
+              <input type="password" autoFocus value={value} onChange={e => setValue(e.target.value)}
+                placeholder={provider.placeholder}
+                style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--bg)", color: "var(--text)", fontSize: 12, fontFamily: "monospace", minWidth: 240 }} />
+              <button className="btn btn-primary" onClick={() => { onSave(value); setEditing(false); setValue(""); }} disabled={!value} style={{ fontSize: 12, padding: "5px 10px" }}>Save</button>
+              <button className="btn" onClick={() => { setEditing(false); setValue(""); }} style={{ fontSize: 12, padding: "5px 10px" }}>Cancel</button>
+            </>
+          )}
+          {status === "user" && !editing && (
+            <button className="btn" onClick={onDelete} style={{ fontSize: 12, padding: "5px 10px", color: "#dc2626" }}>Remove</button>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
