@@ -157,16 +157,22 @@ function mockTransport(): MockTransportAPI {
     await new Promise(r => setTimeout(r, 10));
 
     pass("second send is thread/start", m.sent[1]?.method === "thread/start");
-    pass("thread/start title forwarded", m.sent[1]?.params?.title === "Audit run 1");
-    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: { threadId: "ct_99" } });
+    // P64.2 — real codex ThreadStartResponse is `{ thread: { id, ... }, model, ... }`.
+    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: {
+      thread: { id: "ct_99" }, model: "o3", modelProvider: "openai", cwd: "/tmp",
+    } });
     await new Promise(r => setTimeout(r, 10));
 
     pass("third send is turn/start", m.sent[2]?.method === "turn/start");
     pass("turn/start uses codexThreadId from thread/start",
       m.sent[2]?.params?.threadId === "ct_99");
-    pass("turn/start forwards user input",
-      m.sent[2]?.params?.input === "hello");
-    m.receive({ jsonrpc: "2.0", id: m.sent[2].id, result: { turnId: "tu_1" } });
+    // P64.2 — real codex TurnStartParams.input is Array<UserInput> with
+    // each item shaped `{ type: "text", text, text_elements }`.
+    pass("turn/start forwards user input as text UserInput",
+      Array.isArray(m.sent[2]?.params?.input)
+      && m.sent[2].params.input[0]?.type === "text"
+      && m.sent[2].params.input[0]?.text === "hello");
+    m.receive({ jsonrpc: "2.0", id: m.sent[2].id, result: { turn: { id: "tu_1" } } });
     await new Promise(r => setTimeout(r, 10));
 
     // Stream text + tool call + tool result.
@@ -181,14 +187,17 @@ function mockTransport(): MockTransportAPI {
       params: { turnId: "tu_1", callId: "c1", output: "matched 3" },
     });
 
-    // P59 — interactive approval. Send the approval/required, then
-    // simulate the user clicking Accept after a brief delay.
+    // P64.2 — Real codex emits approvals as server-initiated JSON-RPC
+    // REQUESTS with an id (not notifications). Our compat shim
+    // (installApprovalBridge) projects them onto the legacy
+    // "approval/required" notification shape that chat-bridge already
+    // subscribes to. The id we put on this fake server request is the
+    // id codex would expect to see in our response.
+    const FAKE_APPROVAL_ID = 5001;
     m.receive({
-      jsonrpc: "2.0", method: "approval/required",
-      params: {
-        approvalId: "ap1", turnId: "tu_1", kind: "command",
-        summary: "Run ls", command: "ls /tmp",
-      },
+      jsonrpc: "2.0", id: FAKE_APPROVAL_ID,
+      method: "item/commandExecution/requestApproval",
+      params: { command: "ls /tmp", cwd: "/tmp" },
     });
     // The bridge has stored the approval and is polling for a decision.
     // Verify the SSE event surfaced.
@@ -196,25 +205,27 @@ function mockTransport(): MockTransportAPI {
     const approvalEvt = sseEvents.find(e => e.type === "approval");
     pass("approval event emitted with kind+summary+command",
       !!approvalEvt && approvalEvt.kind === "command"
-      && approvalEvt.summary === "Run ls" && approvalEvt.command === "ls /tmp");
+      && /ls \/tmp/.test(approvalEvt.summary) && approvalEvt.command === "ls /tmp");
     pass("approval event marks interactive=true (not autoAccepted)",
       approvalEvt?.interactive === true && !approvalEvt?.autoAccepted);
 
-    // Simulate user clicking Accept by setting decision in our mock store.
-    nextDecision("ap1", "accept");
+    // Simulate user clicking Accept by setting decision in our mock
+    // store keyed on the SYNTHESIZED approvalId emitted by the bridge.
+    nextDecision(approvalEvt.approvalId, "accept");
     await new Promise(r => setTimeout(r, 700));
 
-    // Verify the bridge sent approval/respond with accept.
-    const respondReq = m.sent.find(e => e.method === "approval/respond" && e.params?.approvalId === "ap1");
-    pass("approval/respond sent after user accepts", !!respondReq);
-    pass("approval/respond decision matches user click",
-      respondReq?.params?.decision === "accept");
-    if (respondReq) {
-      m.receive({ jsonrpc: "2.0", id: respondReq.id, result: {} });
-    }
+    // P64.2 — instead of a separate "approval/respond" method, the
+    // bridge sends a JSON-RPC RESPONSE with the original server-request
+    // id and a `result.decision` field.
+    const respondReq = m.sent.find(e => e.id === FAKE_APPROVAL_ID && (e.result || e.error));
+    pass("approval response sent for original server-request id", !!respondReq);
+    pass("approval response carries codex decision = approved",
+      respondReq?.result?.decision === "approved");
 
     // Verify approval_resolved SSE event fired with the user's decision.
-    const resolvedEvt = sseEvents.find(e => e.type === "approval_resolved" && e.approvalId === "ap1");
+    const resolvedEvt = sseEvents.find(
+      e => e.type === "approval_resolved" && e.approvalId === approvalEvt.approvalId,
+    );
     pass("approval_resolved event emitted", !!resolvedEvt);
     pass("approval_resolved decision matches", resolvedEvt?.decision === "accept");
     pass("approval_resolved marks not timed out", resolvedEvt?.timedOut === false);
@@ -256,7 +267,7 @@ function mockTransport(): MockTransportAPI {
       m.sent[1]?.method === "turn/start");
     pass("second turn: reuses ct_99",
       m.sent[1]?.params?.threadId === "ct_99");
-    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: { turnId: "tu_2" } });
+    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: { turn: { id: "tu_2" } } });
     m.receive({ jsonrpc: "2.0", method: "turn/finished", params: { turnId: "tu_2" } });
     const r2 = await turnPromise;
     pass("second turn completes without error", r2.errored === false);
@@ -280,20 +291,30 @@ function mockTransport(): MockTransportAPI {
     if (!m) { pass("timeout: transport", false); return; }
     m.receive({ jsonrpc: "2.0", id: m.sent[0].id, result: {} });
     await new Promise(r => setTimeout(r, 10));
-    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: { threadId: "ct_timeout" } });
+    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: {
+      thread: { id: "ct_timeout" }, model: "o3", modelProvider: "openai", cwd: "/tmp",
+    } });
     await new Promise(r => setTimeout(r, 10));
-    m.receive({ jsonrpc: "2.0", id: m.sent[2].id, result: { turnId: "tu_timeout" } });
-    // Send approval; do NOT set a decision. Wait for poll timeout.
+    m.receive({ jsonrpc: "2.0", id: m.sent[2].id, result: { turn: { id: "tu_timeout" } } });
+    // Send approval as a server-initiated REQUEST (with id). Do NOT
+    // set a decision. Wait for poll timeout — the bridge should
+    // respond with a denied result.
+    const FAKE_TIMEOUT_ID = 6001;
     m.receive({
-      jsonrpc: "2.0", method: "approval/required",
-      params: { approvalId: "ap-timeout", turnId: "tu_timeout", kind: "file", summary: "Edit secret", path: "/etc/secret" },
+      jsonrpc: "2.0", id: FAKE_TIMEOUT_ID,
+      method: "item/fileChange/requestApproval",
+      params: { path: "/etc/secret", diff: "+secret = ..." },
     });
     await new Promise(r => setTimeout(r, 1200));
-    // Bridge should have sent decline after the 800ms timeout.
-    const respond = m.sent.find(e => e.method === "approval/respond" && e.params?.approvalId === "ap-timeout");
-    pass("timeout sends decline", respond?.params?.decision === "decline");
-    if (respond) m.receive({ jsonrpc: "2.0", id: respond.id, result: {} });
-    const resolvedEvt = sseEvents.find(e => e.type === "approval_resolved" && e.approvalId === "ap-timeout");
+    // Bridge should have sent the JSON-RPC response with decision=denied
+    // after the 800ms poll timeout.
+    const respond = m.sent.find(e => e.id === FAKE_TIMEOUT_ID && (e.result || e.error));
+    pass("timeout sends denied response on original id",
+      respond?.result?.decision === "denied");
+    const sseEvent = sseEvents.find(e => e.type === "approval");
+    const resolvedEvt = sseEvents.find(
+      e => e.type === "approval_resolved" && e.approvalId === sseEvent?.approvalId,
+    );
     pass("timeout emits approval_resolved with timedOut=true",
       resolvedEvt?.timedOut === true && resolvedEvt?.decision === "decline");
     m.receive({ jsonrpc: "2.0", method: "turn/finished", params: { turnId: "tu_timeout" } });
@@ -319,9 +340,11 @@ function mockTransport(): MockTransportAPI {
     if (!m) { pass("artifact: transport", false); return; }
     m.receive({ jsonrpc: "2.0", id: m.sent[0].id, result: {} });
     await new Promise(r => setTimeout(r, 10));
-    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: { threadId: "ct_edit" } });
+    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: {
+      thread: { id: "ct_edit" }, model: "o3", modelProvider: "openai", cwd: "/tmp",
+    } });
     await new Promise(r => setTimeout(r, 10));
-    m.receive({ jsonrpc: "2.0", id: m.sent[2].id, result: { turnId: "tu_edit" } });
+    m.receive({ jsonrpc: "2.0", id: m.sent[2].id, result: { turn: { id: "tu_edit" } } });
     m.receive({
       jsonrpc: "2.0", method: "file/changeRequested",
       params: { turnId: "tu_edit", changeId: "ch1", path: "src/foo.ts", diff: "+const x = 1;" },
@@ -362,9 +385,11 @@ function mockTransport(): MockTransportAPI {
     if (!m) { pass("image: transport", false); return; }
     m.receive({ jsonrpc: "2.0", id: m.sent[0].id, result: {} });
     await new Promise(r => setTimeout(r, 10));
-    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: { threadId: "ct_img" } });
+    m.receive({ jsonrpc: "2.0", id: m.sent[1].id, result: {
+      thread: { id: "ct_img" }, model: "o3", modelProvider: "openai", cwd: "/tmp",
+    } });
     await new Promise(r => setTimeout(r, 10));
-    m.receive({ jsonrpc: "2.0", id: m.sent[2].id, result: { turnId: "tu_img" } });
+    m.receive({ jsonrpc: "2.0", id: m.sent[2].id, result: { turn: { id: "tu_img" } } });
     m.receive({
       jsonrpc: "2.0", method: "tool/call",
       params: { turnId: "tu_img", toolName: "generate_image", arguments: {}, callId: "c-img" },
