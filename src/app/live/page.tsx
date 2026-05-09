@@ -109,11 +109,13 @@ export default function LivePage() {
             );
           })}
 
-          {/* P51 — cron cadence note. Vercel cron fires the scheduler every
-              5 minutes, so a schedule with intervalMinutes < 5 effectively
-              rounds up. Run-now bypasses cron for instant verification. */}
+          {/* P51 — cron cadence note. On Vercel Hobby, cron fires daily;
+              opening this page also opportunistically fires due schedules
+              (rate-limited to once per 30s globally). For minute-grade
+              cadence, hit /api/cron?token=$CRON_SECRET from an external
+              cron service like cron-job.org. Click Run now anytime. */}
           <div style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 10, lineHeight: 1.5 }}>
-            Cron fires every 5 minutes. Schedules with intervals shorter than that round up to the next tick. Click Run now to fire immediately.
+            Vercel cron fires once per day on the Hobby plan. Opening this page kicks any due schedules immediately — and Run now bypasses cron entirely. For fine-grained cadence, point an external scheduler at <code className="mono" style={{ background: "var(--bg-subtle)", padding: "1px 6px", borderRadius: 4 }}>/api/cron?token=$CRON_SECRET</code>.
           </div>
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 40, marginBottom: 12 }}>

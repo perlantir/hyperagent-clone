@@ -18,12 +18,18 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function GET(req: Request) {
-  // Vercel Cron sends Authorization: Bearer <CRON_SECRET>. We accept that or
-  // an x-vercel-cron header signal.
+  // Vercel Cron sends Authorization: Bearer <CRON_SECRET>. We accept that,
+  // an x-vercel-cron header signal, OR a ?token= query param matching
+  // CRON_SECRET so users on plans with daily-only cron can hit this from
+  // an external scheduler (cron-job.org, GitHub Actions, etc.) every few
+  // minutes for higher-frequency schedule firing.
   const auth = req.headers.get("authorization") || "";
   const secret = process.env.CRON_SECRET;
   const isVercelCron = req.headers.get("x-vercel-cron") === "1";
-  if (secret && !isVercelCron && auth !== `Bearer ${secret}`) {
+  const url = new URL(req.url);
+  const tokenParam = url.searchParams.get("token");
+  const tokenOk = secret ? tokenParam === secret : false;
+  if (secret && !isVercelCron && auth !== `Bearer ${secret}` && !tokenOk) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
