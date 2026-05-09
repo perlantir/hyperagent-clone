@@ -46,7 +46,7 @@ export function SummarySidebar({
       borderLeft: "1px solid var(--border)",
       background: "var(--bg-subtle)",
     }}>
-      {/* Avatar / name tile */}
+      {/* Avatar / name tile — P49: if avatar URL set, render image */}
       <div style={{
         padding: "20px 18px",
         borderBottom: "1px solid var(--border)",
@@ -54,12 +54,14 @@ export function SummarySidebar({
       }}>
         <div style={{
           width: 80, height: 80, borderRadius: 20,
-          background: COLOR_GRADIENTS[agent.color] || COLOR_GRADIENTS.orange,
+          background: agent.avatar
+            ? `url(${agent.avatar}) center/cover`
+            : (COLOR_GRADIENTS[agent.color] || COLOR_GRADIENTS.orange),
           color: "white",
           display: "grid", placeItems: "center",
           fontSize: 32, fontWeight: 700,
           boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
-        }}>{agent.icon}</div>
+        }}>{!agent.avatar && agent.icon}</div>
       </div>
 
       {/* Model row */}

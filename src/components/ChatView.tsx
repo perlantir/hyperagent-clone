@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useRouter as useNextRouter } from "next/navigation";
 import { SaveMemoryButton } from "@/components/SaveMemoryButton";
 import { useToast } from "@/components/Toast";
 import { AddMenu, RunModeMenu, type RunMode } from "@/components/ComposerMenu";
@@ -25,6 +26,7 @@ interface Msg {
 
 export function ChatView({ threadId, agentId }: { threadId: string; agentId: string | null }) {
   const toast = useToast();
+  const nextRouter = useNextRouter();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -258,6 +260,22 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
     setMessages(m => { const c = [...m]; c[index] = { ...c[index], planResolved: true }; return c; });
   }
 
+  // P49 — Fork from a specific user message. Creates a new thread with all
+  // messages up to (and including) the chosen message, then routes there.
+  async function forkFromMessage(messageId: string) {
+    const r = await fetch(`/api/threads/${threadId}/fork`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fromMessageId: messageId }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.threadId) {
+      toast.error("Fork failed", j.error || "could not fork from this message");
+      return;
+    }
+    toast.success("Forked", `Copied ${j.copiedMessages} message${j.copiedMessages === 1 ? "" : "s"} to a new thread.`);
+    nextRouter.push(`/threads/${j.threadId}`);
+  }
+
   return (
     <div
       style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}
@@ -307,6 +325,7 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
             <MessageView key={i} m={m}
               onApprovePlan={() => approvePlan(i)}
               onRejectPlan={() => rejectPlan(i)}
+              onFork={m.id ? () => forkFromMessage(m.id!) : undefined}
             />
           ))}
         </div>
@@ -425,14 +444,15 @@ function AttachmentPill({ a, onRemove }: { a: Attachment; onRemove: () => void }
   );
 }
 
-function MessageView({ m, onApprovePlan, onRejectPlan }: {
+function MessageView({ m, onApprovePlan, onRejectPlan, onFork }: {
   m: Msg;
   onApprovePlan?: () => void;
   onRejectPlan?: () => void;
+  onFork?: () => void;
 }) {
   if (m.role === "user") {
     return (
-      <div style={{ alignSelf: "flex-end", maxWidth: "75%", display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+      <div className="msg-user-row" style={{ alignSelf: "flex-end", maxWidth: "75%", display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end", position: "relative" }}>
         {m.attachments && m.attachments.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "flex-end" }}>
             {m.attachments.map((a, i) => (
@@ -457,6 +477,20 @@ function MessageView({ m, onApprovePlan, onRejectPlan }: {
         )}
         {m.content && (
           <div style={{ background: "var(--bg-subtle)", padding: "11px 16px", borderRadius: "16px 16px 4px 16px", fontSize: 14.5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{m.content}</div>
+        )}
+        {/* P49 — fork button: branches a new thread from this point. Hover-only
+            to keep the message column clean; falls back to always-visible
+            on touch devices via @media. */}
+        {onFork && (
+          <button onClick={onFork} className="msg-fork-btn" title="Fork from here — branch a new thread"
+            style={{
+              position: "absolute", top: -4, right: -32,
+              width: 26, height: 26, borderRadius: 6,
+              border: "1px solid var(--border)",
+              background: "var(--bg)", color: "var(--text-muted)",
+              display: "grid", placeItems: "center", cursor: "pointer",
+              fontSize: 12, opacity: 0, transition: "opacity 0.15s",
+            }}>⤴</button>
         )}
       </div>
     );

@@ -113,3 +113,9 @@ input, textarea { font-family: inherit; }
 @keyframes blink { 0%,50%{opacity:1} 51%,100%{opacity:0} }
 
 a { color: inherit; text-decoration: none; }
+
+/* P49 — fork button on user messages, visible on hover (and always on touch) */
+.msg-user-row:hover .msg-fork-btn { opacity: 1; }
+.msg-fork-btn:hover { background: var(--bg-elev); border-color: var(--border-strong); color: var(--text); }
+@media (hover: none) { .msg-fork-btn { opacity: 0.6 !important; } }
+

@@ -26,11 +26,15 @@ export function ConfigTab({ agent, onSave }: {
   const [routerHint, setRouterHint] = useState(agent.routerHint || "");
   const [color, setColor] = useState(agent.color);
   const [icon, setIcon] = useState(agent.icon);
+  // P49 — agent avatar (data URL, capped at 512 KB). When set, supersedes
+  // the gradient + icon glyph in the SummarySidebar tile.
+  const [avatar, setAvatar] = useState<string>(agent.avatar || "");
   const [modelId, setModelId] = useState(agent.modelId || "");
   const [subagentModelId, setSubagentModelId] = useState(agent.subagentModelId || "");
   const [extendedThinking, setExtendedThinking] = useState(!!agent.extendedThinking);
   const [budget, setBudget] = useState(agent.maxRunBudgetCredits ?? "");
   const [saving, setSaving] = useState(false);
+  const toast = useToast();
 
   const isDirty =
     name !== agent.name ||
@@ -39,6 +43,7 @@ export function ConfigTab({ agent, onSave }: {
     routerHint !== (agent.routerHint || "") ||
     color !== agent.color ||
     icon !== agent.icon ||
+    avatar !== (agent.avatar || "") ||
     modelId !== (agent.modelId || "") ||
     subagentModelId !== (agent.subagentModelId || "") ||
     extendedThinking !== !!agent.extendedThinking ||
@@ -53,12 +58,28 @@ export function ConfigTab({ agent, onSave }: {
       routerHint,
       color,
       icon: icon.trim().slice(0, 2) || agent.icon,
+      avatar: avatar || null,
       modelId: modelId || null,
       subagentModelId: subagentModelId || null,
       extendedThinking,
       maxRunBudgetCredits: budget === "" ? null : Number(budget),
     });
     setSaving(false);
+  }
+
+  // P49 — read avatar file as data URL with same 512 KB cap as the Profile
+  // section. Skipping the upload-to-artifact dance keeps avatars cheap to
+  // store and avoids round-tripping a CDN for a few KB.
+  function onAvatarFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.size > 512 * 1024) {
+      toast.error("Image too large", "Avatar must be under 512 KB.");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setAvatar(String(reader.result));
+    reader.readAsDataURL(f);
   }
 
   return (
@@ -97,6 +118,37 @@ export function ConfigTab({ agent, onSave }: {
           placeholder="When should the smart router pick this agent?"
           style={{ resize: "vertical" }}
         />
+      </Field>
+
+      {/* P49 — avatar / icon / color block */}
+      <Field label="Avatar">
+        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+          <div style={{
+            width: 64, height: 64, borderRadius: 14,
+            background: avatar
+              ? `url(${avatar}) center/cover`
+              : (COLORS.find(c => c.id === color)?.gradient || COLORS[0].gradient),
+            color: "white",
+            display: "grid", placeItems: "center",
+            fontSize: 26, fontWeight: 700, flexShrink: 0,
+            boxShadow: "0 4px 14px rgba(0,0,0,0.12)",
+          }}>{!avatar && icon}</div>
+          <div style={{ flex: 1 }}>
+            <label style={{ display: "inline-block" }}>
+              <input type="file" accept="image/*" onChange={onAvatarFile} style={{ display: "none" }} />
+              <span className="btn" style={{ fontSize: 12, padding: "6px 12px", display: "inline-block", cursor: "pointer" }}>
+                {avatar ? "Replace image" : "Upload image"}
+              </span>
+            </label>
+            {avatar && (
+              <button type="button" className="btn" onClick={() => setAvatar("")}
+                style={{ marginLeft: 6, fontSize: 12, padding: "6px 12px" }}>Remove</button>
+            )}
+            <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 6 }}>
+              JPG, PNG, GIF, or SVG. Up to 512 KB. When set, replaces the icon + color tile.
+            </div>
+          </div>
+        </div>
       </Field>
 
       <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 14, alignItems: "start" }}>
