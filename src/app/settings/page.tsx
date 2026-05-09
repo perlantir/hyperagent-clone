@@ -4,6 +4,7 @@ import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
+import { SandboxPolicyPanel } from "@/components/SandboxPolicyPanel";
 
 function KeyRow({ provider, status, onSave, onDelete }: {
   provider: { id: string; label: string; description: string; placeholder: string; helpUrl: string };
@@ -336,6 +337,12 @@ export default function SettingsPage() {
             </div>
             {saving && <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-muted)" }}>Saving…</div>}
             {saved && <div style={{ marginTop: 8, fontSize: 12, color: "var(--green)" }}>✓ Saved</div>}
+          </div>
+
+          {/* P34 — Sandbox policy */}
+          <div style={{ marginBottom: 40 }}>
+            <div className="h-section" style={{ marginBottom: 12 }}>Sandbox</div>
+            <SandboxPolicyPanel />
           </div>
 
           {/* Theme */}

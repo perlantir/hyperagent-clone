@@ -28,7 +28,8 @@ export type AuditAction =
   | "rate_limit.blocked"
   | "permission.denied"
   | "thread.delete" | "agent_run.cancelled"
-  | "cron.tick";
+  | "cron.tick"
+  | "sandbox.exec" | "sandbox.blocked";
 
 export type AuditResult = "success" | "failure" | "denied";
 
