@@ -10,32 +10,60 @@
 
 // ─── Provider mode ───────────────────────────────────────────────────
 
-// Three explicit modes. Selection is always user-driven; we never
-// silently switch between billing models or accounts.
+// P64 — Provider modes are now phase-aware so the UI can pick the right
+// connection path based on where the app is running.
 //
-// P58 — collapsed the platform-vs-BYOK split. resolveSecret already
-// falls back from user_secrets to env, so a single "openaiApiKey" mode
-// covers both. The three modes the UI exposes are now:
+//   anthropicApiKey         — Anthropic Claude (default)
+//   openaiApiKey            — OpenAI Chat Completions, platform key
+//   openaiUserApiKey        — OpenAI Chat Completions, user-provided key
+//   codexChatGPTLocal       — Phase 2: app spawns codex app-server via
+//                             stdio. Only enabled when running locally /
+//                             in dev / inside a desktop wrapper. Detected
+//                             at runtime; never available on Vercel.
+//   codexChatGPTBridge      — Phase 1: hosted app + manually configured
+//                             bridge running on the user's machine. The
+//                             user pastes ws://localhost:<port> + token.
+//                             Marked advanced/experimental. The paste is
+//                             a hosted-web limitation (Vercel can't reach
+//                             the user's laptop), NOT an OpenAI rule.
+//   codexChatGPTCompanion   — Phase 3: hosted app talks to a local
+//                             companion that owns the codex app-server.
+//                             Pairing replaces manual paste. Browser
+//                             connects directly to companion via WS
+//                             with PNA preflight.
 //
-//   anthropicApiKey   — Anthropic Claude (default)
-//   openaiApiKey      — OpenAI Chat Completions API
-//   codexChatGPT      — EXPERIMENTAL Codex via ChatGPT Sign-In bridge
+// Selection is always user-driven; we never silently switch billing
+// models or auth accounts.
 export type CodexProviderMode =
   | "anthropicApiKey"
   | "openaiApiKey"
-  | "codexChatGPT";
+  | "openaiUserApiKey"
+  | "codexChatGPTLocal"
+  | "codexChatGPTBridge"
+  | "codexChatGPTCompanion";
 
 export const CODEX_PROVIDER_MODES: readonly CodexProviderMode[] = [
   "anthropicApiKey",
   "openaiApiKey",
-  "codexChatGPT",
+  "openaiUserApiKey",
+  "codexChatGPTLocal",
+  "codexChatGPTBridge",
+  "codexChatGPTCompanion",
 ] as const;
 
-// P58 — defensive normalization for legacy values stored in the DB.
-// Pre-rework rows might say "openaiUserApiKey"; collapse to "openaiApiKey".
-// Anything outside the enum becomes the default mode.
+// True for any of the three Codex-via-ChatGPT modes. Useful for chat
+// dispatch + "is this a Codex turn?" checks.
+export function isCodexMode(m: CodexProviderMode): boolean {
+  return m === "codexChatGPTLocal"
+      || m === "codexChatGPTBridge"
+      || m === "codexChatGPTCompanion";
+}
+
+// Phase-1 -> Phase-3 migration helper. Old rows might carry literal
+// "codexChatGPT" (P57 enum). Translate to the new bridge mode so users
+// who previously pasted bridge URLs keep working.
 export function normalizeProviderMode(raw: any): CodexProviderMode {
-  if (raw === "openaiUserApiKey") return "openaiApiKey";
+  if (raw === "codexChatGPT") return "codexChatGPTBridge";
   if (CODEX_PROVIDER_MODES.includes(raw)) return raw as CodexProviderMode;
   return "anthropicApiKey";
 }

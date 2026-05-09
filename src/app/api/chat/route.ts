@@ -378,14 +378,48 @@ Do not skip the planning step even if the request seems simple.`,
           if (r.errored) emitter.emit("error", { source: "openai", message: r.errorMessage || "openai turn failed" });
           else emitter.emit("llm_call", { model: oaModel, inputTokens: totalIn, outputTokens: totalOut });
           skipMainLoop = true;
-        } else if (providerMode === "codexChatGPT") {
-          const bridge = await getBridgeConfig(user.id);
-          if (!bridge) {
-            send({ type: "error", message: "Codex provider mode is selected, but no bridge is configured. Configure one in Settings → Codex / OpenAI." });
-            emitter.emit("error", { source: "codex", message: "no bridge configured" });
+        } else if (providerMode === "codexChatGPTBridge"
+                || providerMode === "codexChatGPTLocal"
+                || providerMode === "codexChatGPTCompanion") {
+          // P64 — Codex turns dispatch through chat-bridge with a
+          // transport keyed off the user's mode:
+          //   Phase 1 bridge     → "bridge", needs bridge config
+          //   Phase 2 local      → "local-stdio", no bridge config needed,
+          //                         but the runtime must support spawn()
+          //   Phase 3 companion  → handled in the browser; never reaches
+          //                         this server function. If we somehow do
+          //                         we surface a clear error.
+          let codexErr: string | null = null;
+          let transport: "bridge" | "local-stdio" = "bridge";
+          let bridge: any = undefined;
+          if (providerMode === "codexChatGPTLocal") {
+            const { getLocalRuntimeStatus } = await import("@/lib/codex/local-runtime");
+            const rt = getLocalRuntimeStatus();
+            if (!rt.supportsSpawn) {
+              codexErr = rt.reason === "vercel-hosted"
+                ? "Codex Local mode is selected, but this app is hosted in the cloud. Switch to Codex Bridge or Codex Companion in Settings → Chat provider."
+                : "Codex Local mode is selected, but this runtime can't spawn child processes.";
+            } else if (!rt.codexBinary) {
+              codexErr = "Codex Local mode is selected, but the `codex` binary isn't installed. Install it from https://github.com/openai/codex.";
+            } else {
+              transport = "local-stdio";
+            }
+          } else if (providerMode === "codexChatGPTCompanion") {
+            codexErr = "Codex Companion mode talks directly browser↔companion. Server-side chat dispatch isn't reachable in this mode — open the thread in the UI to use it.";
+          } else {
+            // Phase 1 — bridge.
+            bridge = await getBridgeConfig(user.id);
+            if (!bridge) {
+              codexErr = "Codex Bridge mode is selected, but no bridge is configured. Open Settings → Chat provider → Codex Bridge to paste your bridge URL + token.";
+            }
+          }
+          if (codexErr) {
+            send({ type: "error", message: codexErr });
+            emitter.emit("error", { source: "codex", message: codexErr });
             skipMainLoop = true;
           } else {
             const r = await runCodexChatTurn({
+              transport,
               bridge,
               threadId,
               threadTitle: thread.title,

@@ -28,10 +28,12 @@ async function withClient<T>(userId: string, fn: (c: AppServerClient) => Promise
   const mode = await getProviderMode(userId);
   // We allow account/* operations on any mode (including openaiApiKey
   // mode the user might switch to — letting them check what's signed in
-  // before flipping back to codexChatGPT). But we WARN if the bridge is
-  // configured but the mode isn't codexChatGPT.
-  if (mode !== "codexChatGPT") {
-    // Surface as a soft hint, not a hard error.
+  // before flipping back to a codex mode). Soft-warn if not in any
+  // codex mode.
+  const isCodex = mode === "codexChatGPTBridge"
+               || mode === "codexChatGPTLocal"
+               || mode === "codexChatGPTCompanion";
+  if (!isCodex) {
     console.warn(`[codex] account/* called while providerMode=${mode}; not blocking.`);
   }
   const client = new AppServerClient({

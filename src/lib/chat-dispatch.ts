@@ -86,16 +86,20 @@ export async function runOpenAITurn(input: OpenAITurnInput): Promise<TurnResult>
 
 // ─── Codex runner ────────────────────────────────────────────────────
 //
-// Delegates to runCodexTurn — the bridge owns the conversation state and
-// streams events back. We adapt to our SSE format.
+// Delegates to runCodexTurn — bridge or stdio owns the conversation
+// state and streams events back. We adapt to our SSE format.
+//
+// P64 — transport is provided explicitly:
+//   "bridge"      — Phase 1, user-pasted bridge URL/token (bridge: arg required)
+//   "local-stdio" — Phase 2, locally-spawned codex app-server (no bridge arg)
+// Phase 3 is a browser-only path and doesn't reach this server function.
 
 export interface CodexTurnInput {
-  bridge: CodexBridgeConfig;
+  bridge?: CodexBridgeConfig;
+  transport: "bridge" | "local-stdio";
   threadId: string;
   threadTitle?: string;
   input: string;
-  // P59 — required so artifact rows can carry a messageId pointing at
-  // the assistant message this turn writes into.
   userId: string;
   assistantMessageId: string;
   send: DispatchSend;
@@ -109,6 +113,7 @@ export interface CodexTurnResult extends TurnResult {
 
 export async function runCodexChatTurn(args: CodexTurnInput): Promise<CodexTurnResult> {
   const r = await runCodexTurn({
+    transport: args.transport,
     bridge: args.bridge,
     threadId: args.threadId,
     threadTitle: args.threadTitle,

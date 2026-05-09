@@ -36,19 +36,24 @@ import { getCodexThreadId, setCodexThreadId } from "./thread-map";
 import { createApproval, pollDecision, type ApprovalDecision } from "./approvals-store";
 import { createArtifact } from "../db";
 
+// P64 — connection mode for a single turn. Phase 1 = WebSocket bridge
+// the user pasted; Phase 2 = locally-spawned codex app-server over
+// stdio; Phase 3 = browser-direct to companion (handled client-side, the
+// server never touches the WS in that flow).
+export type CodexTransportMode = "bridge" | "local-stdio";
+
 export interface CodexTurnDispatchOptions {
-  bridge: CodexBridgeConfig;
-  threadId: string;       // HyperAgent thread id
-  threadTitle?: string;   // used for thread/start when we create a new Codex thread
+  // Either provide a bridge config (Phase 1) OR set transport="local-stdio"
+  // (Phase 2). Phase 3 doesn't reach this server-side function — turns
+  // run entirely in the browser via the companion's WS.
+  bridge?: CodexBridgeConfig;
+  transport?: CodexTransportMode;
+  threadId: string;
+  threadTitle?: string;
   input: string;
-  userId: string;         // user that owns the thread (approvals are scoped to this id)
-  // The assistant message row this turn writes into. Artifacts produced
-  // from bridge events are linked to this messageId so the chat view
-  // attaches them under the right turn.
+  userId: string;
   assistantMessageId: string;
   send: (event: any) => void;
-  // P59 — soft cap on waiting for a user decision per approval.
-  // After this elapses we auto-decline. Defaults to 60s.
   approvalTimeoutMs?: number;
 }
 
@@ -70,11 +75,30 @@ const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|svg)$/i;
 const DOC_PROMOTE_MIN_LEN = 1000;
 
 export async function runCodexTurn(opts: CodexTurnDispatchOptions): Promise<CodexTurnResult> {
-  const client = new AppServerClient({
-    url: opts.bridge.url,
-    capabilityToken: opts.bridge.capabilityToken,
-    capabilities: { experimentalApi: opts.bridge.experimentalApi },
-  });
+  // P64 — pick the right transport. Phase 1 needs a bridge config;
+  // Phase 2 doesn't (the AppServerClient builds a stdio transport
+  // internally via createStdioTransport).
+  const mode: CodexTransportMode = opts.transport
+    || (opts.bridge ? "bridge" : "local-stdio");
+
+  let client: AppServerClient;
+  if (mode === "bridge") {
+    if (!opts.bridge) {
+      throw new Error("runCodexTurn(mode=bridge) requires bridge config");
+    }
+    client = new AppServerClient({
+      url: opts.bridge.url,
+      capabilityToken: opts.bridge.capabilityToken,
+      capabilities: { experimentalApi: opts.bridge.experimentalApi },
+    });
+  } else {
+    // Phase 2 — locally-spawned stdio process. We pass a custom
+    // transport built via createStdioTransport and skip the URL/token
+    // bridge plumbing entirely.
+    const { createStdioTransport } = await import("./transport");
+    const transport = await createStdioTransport({});
+    client = new AppServerClient({ transport });
+  }
 
   let text = "";
   const toolUses: { name: string; args: any; result?: string }[] = [];

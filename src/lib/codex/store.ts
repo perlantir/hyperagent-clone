@@ -98,14 +98,27 @@ export async function getBridgeConfig(userId: string): Promise<CodexBridgeConfig
   }
 }
 
-export async function setBridgeConfig(userId: string, cfg: CodexBridgeConfig): Promise<void> {
+export async function setBridgeConfig(
+  userId: string,
+  cfg: CodexBridgeConfig & { allowNonLoopback?: boolean },
+): Promise<void> {
   await ensureCodexSchema();
-  // Validate URL shape before persisting so we never store junk.
   let parsed: URL;
   try { parsed = new URL(cfg.url); }
   catch { throw new Error("Bridge URL is not a valid URL"); }
   if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
     throw new Error("Bridge URL must use ws:// or wss://");
+  }
+  // P64 — by default require the URL to point at loopback/private/local
+  // hosts. The bridge runs on the user's own machine; an internet-routable
+  // URL almost always indicates a misconfiguration that would expose the
+  // capability token to a third party. Users who genuinely need to point
+  // at a remote bridge can opt in via allowNonLoopback (advanced flag).
+  if (!cfg.allowNonLoopback && !isLoopbackOrPrivate(parsed.hostname)) {
+    throw new Error(
+      `Bridge URL must point at localhost, 127.0.0.1, ::1, or a private network host (10.*, 172.16-31.*, 192.168.*). ` +
+      `Got "${parsed.hostname}". If you really mean to connect to an internet-routable host, set the advanced flag explicitly.`,
+    );
   }
   if (!cfg.capabilityToken || cfg.capabilityToken.length < 16) {
     throw new Error("Capability token must be at least 16 characters");
@@ -127,4 +140,29 @@ export async function setBridgeConfig(userId: string, cfg: CodexBridgeConfig): P
 export async function deleteBridgeConfig(userId: string): Promise<void> {
   await ensureCodexSchema();
   await pool().query(`DELETE FROM codex_bridges WHERE "userId"=$1`, [userId]);
+}
+
+// P64 — strict check: only loopback or RFC1918 private hosts. Refuses
+// public IPs and DNS names that resolve to public space (we can't
+// resolve in a sync function so we just match string patterns; the
+// transport itself adds another DNS-time guard).
+export function isLoopbackOrPrivate(host: string): boolean {
+  if (!host) return false;
+  const h = host.toLowerCase();
+  if (h === "localhost" || h === "::1" || h.endsWith(".localhost") || h.endsWith(".local")) return true;
+  // IPv4 loopback / RFC1918 / link-local
+  const ipv4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const o1 = +ipv4[1], o2 = +ipv4[2];
+    if (o1 === 127) return true;                           // loopback
+    if (o1 === 10) return true;                            // 10.0.0.0/8
+    if (o1 === 192 && o2 === 168) return true;             // 192.168.0.0/16
+    if (o1 === 172 && o2 >= 16 && o2 <= 31) return true;   // 172.16.0.0/12
+    if (o1 === 169 && o2 === 254) return true;             // link-local
+    return false;
+  }
+  // IPv6 unique-local fc00::/7 + link-local fe80::/10. Cheap prefix check.
+  if (/^(fc|fd)[0-9a-f]{2}:/.test(h)) return true;
+  if (/^fe8[0-9a-f]:/.test(h)) return true;
+  return false;
 }

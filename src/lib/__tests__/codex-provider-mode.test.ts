@@ -1,16 +1,16 @@
-// P57+P58 — codex provider-mode selection invariants.
+// P57 + P58 + P64 — codex provider-mode selection invariants.
 //
-// Asserts the no-silent-fallback rules:
-//   - The set of allowed modes is exactly {anthropicApiKey, openaiApiKey, codexChatGPT}.
+// Asserts the no-silent-fallback rules across the rebuild:
+//   - The set of allowed modes is exactly the 6-mode P64 enum.
 //   - Setting an unknown mode throws (never silently maps to a default).
-//   - getProviderMode returns the stored value, defaulting to anthropicApiKey
-//     when no row is present or the value is unrecognized. Legacy
-//     "openaiUserApiKey" rows normalize to "openaiApiKey".
+//   - getProviderMode returns the stored value, defaulting to
+//     anthropicApiKey when no row is present or the value is unrecognized.
+//   - Legacy values normalize: "codexChatGPT" → "codexChatGPTBridge"
+//     so users who configured Phase 1 in P57 don't lose their setting.
 //   - The provider mode is independent of bridge config: deleting the
-//     bridge does NOT auto-flip the mode away from codexChatGPT, because
-//     the user must make that choice explicitly.
+//     bridge does NOT auto-flip the mode away from any codex mode.
 
-import { CODEX_PROVIDER_MODES, normalizeProviderMode } from "../codex/types";
+import { CODEX_PROVIDER_MODES, normalizeProviderMode, isCodexMode } from "../codex/types";
 
 let failed = 0;
 function pass(label: string, cond: boolean, detail?: string) {
@@ -20,24 +20,44 @@ function pass(label: string, cond: boolean, detail?: string) {
 
 // ─── enum shape ─────────────────────────────────────────────────────
 
-pass("enum has exactly three modes", CODEX_PROVIDER_MODES.length === 3);
-pass("enum includes anthropicApiKey", CODEX_PROVIDER_MODES.includes("anthropicApiKey"));
-pass("enum includes openaiApiKey", CODEX_PROVIDER_MODES.includes("openaiApiKey"));
-pass("enum includes codexChatGPT", CODEX_PROVIDER_MODES.includes("codexChatGPT"));
+pass("enum has exactly six modes", CODEX_PROVIDER_MODES.length === 6);
+pass("enum includes anthropicApiKey",         CODEX_PROVIDER_MODES.includes("anthropicApiKey"));
+pass("enum includes openaiApiKey",            CODEX_PROVIDER_MODES.includes("openaiApiKey"));
+pass("enum includes openaiUserApiKey",        CODEX_PROVIDER_MODES.includes("openaiUserApiKey"));
+pass("enum includes codexChatGPTLocal",       CODEX_PROVIDER_MODES.includes("codexChatGPTLocal"));
+pass("enum includes codexChatGPTBridge",      CODEX_PROVIDER_MODES.includes("codexChatGPTBridge"));
+pass("enum includes codexChatGPTCompanion",   CODEX_PROVIDER_MODES.includes("codexChatGPTCompanion"));
 
-// Legacy "openaiUserApiKey" normalizes to "openaiApiKey".
-pass("legacy openaiUserApiKey normalized", normalizeProviderMode("openaiUserApiKey") === "openaiApiKey");
-pass("unknown value normalizes to anthropicApiKey", normalizeProviderMode("garbage") === "anthropicApiKey");
-pass("undefined normalizes to anthropicApiKey", normalizeProviderMode(undefined) === "anthropicApiKey");
-pass("null normalizes to anthropicApiKey", normalizeProviderMode(null) === "anthropicApiKey");
-pass("known mode passes through", normalizeProviderMode("codexChatGPT") === "codexChatGPT");
+// Legacy "codexChatGPT" (the P57 enum value) → "codexChatGPTBridge".
+pass("legacy codexChatGPT normalizes to codexChatGPTBridge",
+  normalizeProviderMode("codexChatGPT") === "codexChatGPTBridge");
+pass("unknown value normalizes to anthropicApiKey",
+  normalizeProviderMode("garbage") === "anthropicApiKey");
+pass("undefined normalizes to anthropicApiKey",
+  normalizeProviderMode(undefined) === "anthropicApiKey");
+pass("null normalizes to anthropicApiKey",
+  normalizeProviderMode(null) === "anthropicApiKey");
+pass("known codex mode passes through",
+  normalizeProviderMode("codexChatGPTLocal") === "codexChatGPTLocal");
+
+// isCodexMode reports correctly for the three codex sub-modes.
+pass("isCodexMode true for codexChatGPTLocal",
+  isCodexMode("codexChatGPTLocal" as any) === true);
+pass("isCodexMode true for codexChatGPTBridge",
+  isCodexMode("codexChatGPTBridge" as any) === true);
+pass("isCodexMode true for codexChatGPTCompanion",
+  isCodexMode("codexChatGPTCompanion" as any) === true);
+pass("isCodexMode false for anthropicApiKey",
+  isCodexMode("anthropicApiKey" as any) === false);
+pass("isCodexMode false for openaiApiKey",
+  isCodexMode("openaiApiKey" as any) === false);
 
 // Unknown values must NOT be in the enum.
 pass("enum rejects 'openai'", !(CODEX_PROVIDER_MODES as readonly string[]).includes("openai"));
 pass("enum rejects 'chatgpt'", !(CODEX_PROVIDER_MODES as readonly string[]).includes("chatgpt"));
 pass("enum rejects empty string", !(CODEX_PROVIDER_MODES as readonly string[]).includes(""));
-pass("enum rejects legacy openaiUserApiKey directly",
-  !(CODEX_PROVIDER_MODES as readonly string[]).includes("openaiUserApiKey"));
+pass("enum rejects legacy codexChatGPT directly",
+  !(CODEX_PROVIDER_MODES as readonly string[]).includes("codexChatGPT"));
 
 // ─── store invariants (mocked DB) ───────────────────────────────────
 //
@@ -49,7 +69,7 @@ type Row = { id: string; codexProviderMode?: string };
 // Pre-rework legacy value — the store should normalize on read.
 const fakeDb: Record<string, Row> = {
   "u1": { id: "u1", codexProviderMode: "anthropicApiKey" },
-  "legacy": { id: "legacy", codexProviderMode: "openaiUserApiKey" },
+  "legacy": { id: "legacy", codexProviderMode: "codexChatGPT" },
 };
 
 const fakePool = {
@@ -102,19 +122,26 @@ const { getProviderMode, setProviderMode } = require("../codex/store");
   pass("getProviderMode defaults anthropicApiKey for unknown user",
     await getProviderMode("nobody") === "anthropicApiKey");
 
-  // Legacy DB row "openaiUserApiKey" normalizes to "openaiApiKey".
-  pass("getProviderMode normalizes legacy openaiUserApiKey",
-    await getProviderMode("legacy") === "openaiApiKey");
+  // Legacy DB row "codexChatGPT" normalizes to "codexChatGPTBridge".
+  pass("getProviderMode normalizes legacy codexChatGPT → codexChatGPTBridge",
+    await getProviderMode("legacy") === "codexChatGPTBridge");
 
   // Set to OpenAI mode.
   await setProviderMode("u1", "openaiApiKey");
   pass("setProviderMode persists openaiApiKey",
     await getProviderMode("u1") === "openaiApiKey");
 
-  // Set to codexChatGPT requires no auto-flip from anything.
-  await setProviderMode("u1", "codexChatGPT");
-  pass("setProviderMode persists codexChatGPT",
-    await getProviderMode("u1") === "codexChatGPT");
+  // Set to user-key mode explicitly.
+  await setProviderMode("u1", "openaiUserApiKey");
+  pass("setProviderMode persists openaiUserApiKey",
+    await getProviderMode("u1") === "openaiUserApiKey");
+
+  // Set to each codex sub-mode.
+  for (const m of ["codexChatGPTLocal", "codexChatGPTBridge", "codexChatGPTCompanion"] as const) {
+    await setProviderMode("u1", m);
+    pass(`setProviderMode persists ${m}`,
+      await getProviderMode("u1") === m);
+  }
 
   // Setting an unknown mode throws — explicit reject, not silent default.
   let threw = false;
@@ -122,17 +149,18 @@ const { getProviderMode, setProviderMode } = require("../codex/store");
   catch { threw = true; }
   pass("setProviderMode throws on unknown mode", threw);
 
-  // Setting the LEGACY enum value throws too — we don't silently accept
-  // it as openaiApiKey; the canonical write path is normalized only on
-  // READ, never on WRITE (writes must use the current enum exactly).
+  // Setting the LEGACY enum value (P57's "codexChatGPT") throws too;
+  // the canonical write path is normalized only on READ, never on
+  // WRITE. Writes must use the current enum exactly.
   let threwLegacy = false;
-  try { await setProviderMode("u1", "openaiUserApiKey" as any); }
+  try { await setProviderMode("u1", "codexChatGPT" as any); }
   catch { threwLegacy = true; }
-  pass("setProviderMode rejects legacy enum value on write", threwLegacy);
+  pass("setProviderMode rejects legacy codexChatGPT on write", threwLegacy);
 
-  // After the throws, the previous value must remain.
+  // After the throws, the previous value must remain — for the codex
+  // family this keeps Phase 1/2/3 segregation explicit.
   pass("setProviderMode does not silently downgrade on error",
-    await getProviderMode("u1") === "codexChatGPT");
+    await getProviderMode("u1") === "codexChatGPTCompanion");
 
   // Setting to anthropic explicitly works (and segregates from any
   // ongoing OpenAI billing).
@@ -145,14 +173,21 @@ const { getProviderMode, setProviderMode } = require("../codex/store");
   const b = await getProviderMode("u1");
   pass("getProviderMode is read-only (idempotent)", a === b);
 
-  // ─── billing/account segregation ──────────────────────────────────
-  // Switching modes should never auto-fall-back to a different billing
-  // model. Specifically: enabling codexChatGPT and then deleting the
-  // bridge keeps the user in codexChatGPT (next turn errors clearly
-  // rather than silently using the platform OpenAI key).
-  await setProviderMode("u1", "codexChatGPT");
+  // ─── account segregation between Codex sub-modes ──────────────────
+  // Switching from codexChatGPTLocal to codexChatGPTBridge must NOT
+  // silently carry the local-stdio auth state into bridge mode.
+  // Provider mode change is the user's explicit decision; we just
+  // verify the value persists as written.
+  await setProviderMode("u1", "codexChatGPTLocal");
+  pass("codexChatGPTLocal persists explicitly",
+    await getProviderMode("u1") === "codexChatGPTLocal");
+  await setProviderMode("u1", "codexChatGPTBridge");
+  pass("flip Local → Bridge persists explicitly (no silent reuse)",
+    await getProviderMode("u1") === "codexChatGPTBridge");
+
+  // Bridge config goes missing → mode does NOT auto-flip.
   pass("provider mode survives a bridge delete (no auto-flip)",
-    await getProviderMode("u1") === "codexChatGPT");
+    await getProviderMode("u1") === "codexChatGPTBridge");
 
   // Same for openaiApiKey: if the user removes their OpenAI key, the
   // mode must remain openaiApiKey (next turn errors with "no key" rather
