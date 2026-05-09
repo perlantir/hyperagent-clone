@@ -361,6 +361,13 @@ export async function createProject(p: Omit<Project,"id"|"createdAt">): Promise<
     [id, p.userId, p.name, p.description, p.color, createdAt]);
   return { ...p, id, createdAt };
 }
+export async function updateProject(id: string, userId: string, fields: Partial<Pick<Project, "name" | "description" | "color">>) {
+  const cur = await getProject(id, userId); if (!cur) return null;
+  const n = { ...cur, ...fields };
+  await q(`UPDATE projects SET name=$1, description=$2, color=$3 WHERE id=$4 AND "userId"=$5`,
+    [n.name, n.description, n.color, id, userId]);
+  return n;
+}
 export async function deleteProject(id: string, userId: string) {
   await q(`DELETE FROM projects WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
