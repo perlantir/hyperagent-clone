@@ -61,21 +61,27 @@ export async function POST() {
   }
 
   // ─── tunnel: re-validate the URL against the server-side deny-list ──
+  let preResolvedAddress: string | undefined;
+  let preResolvedFamily: 4 | 6 | undefined;
   if (loc === "tunnel") {
     const v = validateForServerSideFetch(cfg.url);
     if (!v.ok) {
       return NextResponse.json({ ok: false, error: v.reason }, { status: 400 });
     }
-    // DNS rebinding guard. The URL passed string-level validation, but
-    // a public-looking name could resolve into private space. Refuse if
-    // any resolved IP is not public.
+    // P64.2 — DNS rebinding guard. Resolve the hostname here AND pass
+    // the resolved IP into the WebSocket transport so the underlying
+    // TCP connection pins to the same address. This closes the TOCTOU
+    // window where the second DNS lookup (issued by the WS library
+    // itself) could land on a private address.
     let host = "";
     try { host = new URL(cfg.url).hostname.replace(/^\[|\]$/g, ""); } catch {}
     if (host) {
-      const dns = await verifyResolvedIp(host);
-      if (!dns.ok) {
-        return NextResponse.json({ ok: false, error: dns.reason }, { status: 400 });
+      const dnsCheck = await verifyResolvedIp(host);
+      if (!dnsCheck.ok) {
+        return NextResponse.json({ ok: false, error: dnsCheck.reason }, { status: 400 });
       }
+      preResolvedAddress = dnsCheck.address;
+      preResolvedFamily = dnsCheck.family;
     }
   }
 
@@ -83,14 +89,30 @@ export async function POST() {
     url: cfg.url,
     capabilityToken: cfg.capabilityToken,
     capabilities: { experimentalApi: cfg.experimentalApi },
+    preResolvedAddress,
+    preResolvedFamily,
   });
   const t0 = Date.now();
   try {
     await client.connect();
-    const acct = await client.accountRead();
+    const acct = await client.accountRead({ refreshToken: false });
     const elapsedMs = Date.now() - t0;
-    const { accountId: _drop, ...safe } = (acct as any) || {};
-    return NextResponse.json({ ok: true, elapsedMs, account: safe, location: loc });
+    const account = (acct?.account as any) || null;
+    const safe = account
+      ? {
+          type: account.type,
+          ...(account.type === "chatgpt"
+            ? { email: account.email, planType: account.planType }
+            : {}),
+        }
+      : null;
+    return NextResponse.json({
+      ok: true,
+      elapsedMs,
+      account: safe,
+      requiresOpenaiAuth: !!acct?.requiresOpenaiAuth,
+      location: loc,
+    });
   } catch (e: any) {
     return NextResponse.json({
       ok: false,
