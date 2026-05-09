@@ -149,6 +149,24 @@ export function memoryContextualSegment(memories: Memory[]): PromptSegment | nul
     { priority: 50, source: "memory/contextual", version: 1 });
 }
 
+// P40 — Knowledge retrieval. Fed by retrieveKnowledge() over per-agent
+// uploaded documents. Each chunk surfaces with its source doc + similarity
+// so the model can attribute claims when relevant.
+export function knowledgeSegment(
+  chunks: Array<{ docTitle: string; chunkIdx: number; content: string; similarity: number }> | undefined,
+): PromptSegment | null {
+  if (!chunks || chunks.length === 0) return null;
+  const lines = ["RELEVANT KNOWLEDGE (retrieved from this agent's documents):"];
+  for (const c of chunks) {
+    lines.push(`---\n[${c.docTitle} · chunk ${c.chunkIdx} · sim ${(c.similarity * 100).toFixed(0)}%]`);
+    lines.push(c.content);
+  }
+  lines.push("---");
+  lines.push("When you use information from these chunks, cite the doc title in your response.");
+  return segment("knowledge_retrieval", lines.join("\n"),
+    { priority: 55, source: "knowledge/retrieval", version: 1 });
+}
+
 // =================== ORCHESTRATOR ===================
 
 export interface ComposeContext {
@@ -157,6 +175,8 @@ export interface ComposeContext {
   pinnedMemories: Memory[];
   contextualMemories: Memory[];
   threadContextDocId: string | null;
+  // P40 — top-K retrieved knowledge chunks (per-agent docs).
+  knowledgeChunks?: Array<{ docTitle: string; chunkIdx: number; content: string; similarity: number }>;
 }
 
 // Top-level builder used by chat routes. Returns the segment array ready for
@@ -175,6 +195,7 @@ export function composeSystemPrompt(ctx: ComposeContext): PromptSegment[] {
     workingMemoryHintSegment(ctx.threadContextDocId),
     memoryPinnedSegment(ctx.pinnedMemories),
     memoryContextualSegment(ctx.contextualMemories),
+    knowledgeSegment(ctx.knowledgeChunks),
   ];
   return segments.filter((s): s is PromptSegment => s !== null);
 }

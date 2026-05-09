@@ -410,26 +410,165 @@ export function SkillsTab({ agent }: { agent: AgentLike }) {
   );
 }
 
-// ============ Knowledge Tab (deferred to P40) ============
+// ============ Knowledge Tab (P40 — functional) ============
 
-export function KnowledgeTab() {
+interface KnowledgeDoc {
+  id: string; title: string; sourceUrl: string | null;
+  byteSize: number; createdAt: number; chunkCount?: number;
+}
+
+export function KnowledgeTab({ agent }: { agent: AgentLike }) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [adding, setAdding] = useState(false);
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const r = await fetch(`/api/agents/${agent.id}/knowledge`);
+    if (r.ok) {
+      const j = await r.json();
+      setDocs(j.docs || []);
+    }
+    setLoading(false);
+  }, [agent.id]);
+  useEffect(() => { load(); }, [load]);
+
+  async function submit() {
+    if (!title.trim() || !content.trim()) {
+      toast.error("Title and content required");
+      return;
+    }
+    setSubmitting(true);
+    const r = await fetch(`/api/agents/${agent.id}/knowledge`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: title.trim(),
+        content,
+        sourceUrl: sourceUrl.trim() || undefined,
+      }),
+    });
+    setSubmitting(false);
+    if (r.ok) {
+      const j = await r.json();
+      toast.success(`Doc added`, `${j.chunkCount} chunks indexed.`);
+      setTitle(""); setContent(""); setSourceUrl("");
+      setAdding(false);
+      load();
+    } else {
+      toast.error("Add failed", (await r.json().catch(() => ({}))).error);
+    }
+  }
+
+  async function del(doc: KnowledgeDoc) {
+    const ok = await confirm({
+      title: `Delete "${doc.title}"?`,
+      body: "All chunks + embeddings will be removed. This can't be undone.",
+      confirmLabel: "Delete",
+      variant: "destructive",
+    });
+    if (!ok) return;
+    const r = await fetch(`/api/agents/${agent.id}/knowledge/${doc.id}`, { method: "DELETE" });
+    if (r.ok) {
+      toast.success("Doc deleted");
+      load();
+    } else {
+      toast.error("Delete failed");
+    }
+  }
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 720 }}>
-      <div>
-        <h2 className="h-display" style={{ fontSize: 28, marginBottom: 4 }}>Knowledge</h2>
-        <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Documents the agent can read and retrieve from.</div>
-      </div>
-      <div className="card" style={{
-        padding: 24, textAlign: "center",
-        background: "rgba(168,85,247,0.06)",
-        borderColor: "rgba(168,85,247,0.30)",
-      }}>
-        <div style={{ fontSize: 11.5, fontWeight: 700, color: "#a855f7", letterSpacing: 0.5, marginBottom: 8 }}>COMING IN P40</div>
-        <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 8 }}>Document upload + chunked retrieval</div>
-        <div style={{ fontSize: 12.5, color: "var(--text-muted)", maxWidth: 480, margin: "0 auto", lineHeight: 1.55 }}>
-          Knowledge mirrors the memory subsystem at the document-chunk level: upload PDFs / docs / pages, the system chunks and embeds them, and the agent retrieves the most-relevant chunks at run-time. Auth, audit, and budget all flow through the existing pipeline.
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 880 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
+        <div>
+          <h2 className="h-display" style={{ fontSize: 28, marginBottom: 4 }}>Knowledge</h2>
+          <div style={{ fontSize: 13, color: "var(--text-muted)", maxWidth: 560 }}>
+            Documents the agent retrieves from at run-time. Each doc is chunked (~400 tokens, 200 token overlap), embedded, and the top-4 most-relevant chunks are injected into context per turn.
+          </div>
         </div>
+        {!adding && (
+          <button className="btn btn-primary" onClick={() => setAdding(true)} style={{ fontSize: 12, padding: "6px 14px" }}>
+            + Add doc
+          </button>
+        )}
       </div>
+
+      {adding && (
+        <div className="card" style={{ padding: 16 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 12 }}>Add knowledge document</div>
+          <input
+            value={title} onChange={e => setTitle(e.target.value)}
+            placeholder="Title (required)" className="input"
+            style={{ marginBottom: 8 }}
+          />
+          <input
+            value={sourceUrl} onChange={e => setSourceUrl(e.target.value)}
+            placeholder="Source URL (optional, for citation)" className="input"
+            style={{ marginBottom: 8 }}
+          />
+          <textarea
+            value={content} onChange={e => setContent(e.target.value)}
+            placeholder="Paste document content here. Markdown / plain text / HTML all fine."
+            rows={10}
+            style={{
+              width: "100%", padding: "10px 12px",
+              border: "1px solid var(--border)", borderRadius: 7,
+              background: "var(--bg)", color: "var(--text)",
+              fontSize: 13, lineHeight: 1.55, resize: "vertical",
+              fontFamily: "JetBrains Mono, monospace", outline: "none",
+            }}
+          />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10 }}>
+            <span style={{ fontSize: 11.5, color: "var(--text-faint)" }}>
+              {content ? `${(Buffer.byteLength?.(content, "utf-8") ?? content.length).toLocaleString()} bytes` : "0 bytes"} · 2 MB max
+            </span>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn" onClick={() => setAdding(false)} disabled={submitting}>Cancel</button>
+              <button className="btn btn-primary" onClick={submit} disabled={submitting || !title.trim() || !content.trim()}>
+                {submitting ? "Indexing…" : "Add + index"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {loading ? <Skeleton height={120} /> :
+       docs.length === 0 && !adding ? (
+        <EmptyState
+          title="No knowledge docs yet"
+          body="Upload reference material the agent should retrieve from — product specs, FAQs, internal docs."
+          ctaLabel="Add your first doc"
+          ctaHref="#"
+        />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {docs.map(d => (
+            <div key={d.id} className="card" style={{ padding: 14, display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 600 }}>{d.title}</div>
+                <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>
+                  {d.chunkCount ?? 0} chunks · {(d.byteSize / 1024).toFixed(1)} KB · {new Date(d.createdAt).toLocaleDateString()}
+                </div>
+                {d.sourceUrl && (
+                  <a href={d.sourceUrl} target="_blank" rel="noopener noreferrer"
+                    style={{ fontSize: 11, color: "var(--accent)", textDecoration: "none", marginTop: 2, display: "inline-block" }}>
+                    {d.sourceUrl} ↗
+                  </a>
+                )}
+              </div>
+              <button className="btn" onClick={() => del(d)}
+                style={{ fontSize: 11, padding: "4px 10px", color: "#dc2626", borderColor: "rgba(220,38,38,0.4)" }}>
+                Delete
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

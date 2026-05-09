@@ -108,6 +108,22 @@ export async function POST(req: Request) {
   // the search_knowledge tool which the agent calls explicitly when needed.
   const { pinned: pinnedMemories, contextual: contextualMemories } =
     await retrieveMemoriesForChat(user.id, agent?.id ?? null, thread.projectId, content);
+
+  // P40 — Knowledge retrieval. Fetch top-K most-similar chunks from the
+  // agent's uploaded documents. Skipped when no agent is bound (knowledge
+  // is per-agent in v1; user-scoped knowledge can land later).
+  let knowledgeChunks: any[] = [];
+  if (agent?.id && content) {
+    try {
+      const { retrieveKnowledge } = await import("@/lib/knowledge");
+      knowledgeChunks = await retrieveKnowledge(content, {
+        userId: user.id, agentId: agent.id, topK: 4, threshold: 0.5,
+      });
+    } catch (e) {
+      console.error("[knowledge retrieve]", e);
+    }
+  }
+
   const { composeSystemPrompt } = await import("@/lib/prompt-segments");
   const { compilePrompt } = await import("@/lib/prompt-compiler");
   const segments = composeSystemPrompt({
@@ -116,6 +132,7 @@ export async function POST(req: Request) {
     pinnedMemories,
     contextualMemories,
     threadContextDocId: threadId,
+    knowledgeChunks,
   });
   const compiled = compilePrompt(segments, {
     maxTokens: 16_000, // generous cap; layered prompt should fit comfortably
