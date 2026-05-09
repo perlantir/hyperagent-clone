@@ -11,14 +11,16 @@ interface SearchItem {
 }
 
 const STATIC_PAGES: SearchItem[] = [
-  { type: "page", id: "library",      title: "Library",      subtitle: "All artifacts",      href: "/library" },
-  { type: "page", id: "learning",     title: "Learning",     subtitle: "Skills + memories",  href: "/learning" },
-  { type: "page", id: "skills",       title: "Skills",       subtitle: "Browse templates",   href: "/skills" },
-  { type: "page", id: "integrations", title: "Integrations", subtitle: "Connectors",         href: "/integrations" },
-  { type: "page", id: "live",         title: "Live mode",    subtitle: "Automations",        href: "/live" },
-  { type: "page", id: "billing",      title: "Billing",      subtitle: "Credits + top-up",   href: "/billing" },
-  { type: "page", id: "settings",     title: "Settings",     subtitle: "Account + model",    href: "/settings" },
-  { type: "page", id: "projects",     title: "Projects",     subtitle: "Folders for work",   href: "/projects" },
+  { type: "page", id: "library",        title: "Library",        subtitle: "All artifacts",            href: "/library" },
+  { type: "page", id: "learning",       title: "Learning",       subtitle: "Skills + memories",        href: "/learning" },
+  { type: "page", id: "skills",         title: "Skills",         subtitle: "Browse templates",         href: "/skills" },
+  { type: "page", id: "integrations",   title: "Integrations",   subtitle: "Connectors",               href: "/integrations" },
+  { type: "page", id: "live",           title: "Live mode",      subtitle: "Automations",              href: "/live" },
+  { type: "page", id: "command-center", title: "Command Center", subtitle: "Live ops dashboard",       href: "/command-center" },
+  { type: "page", id: "costs",          title: "Costs",          subtitle: "Per-run + per-agent",      href: "/costs" },
+  { type: "page", id: "billing",        title: "Billing",        subtitle: "Credits + top-up",         href: "/billing" },
+  { type: "page", id: "settings",       title: "Settings",       subtitle: "Account + model",          href: "/settings" },
+  { type: "page", id: "projects",       title: "Projects",       subtitle: "Folders for work",         href: "/projects" },
 ];
 
 export function CommandK() {

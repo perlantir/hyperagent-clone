@@ -27,7 +27,8 @@ export type AuditAction =
   | "webhook.received" | "webhook.rejected"
   | "rate_limit.blocked"
   | "permission.denied"
-  | "thread.delete" | "agent_run.cancelled";
+  | "thread.delete" | "agent_run.cancelled"
+  | "cron.tick";
 
 export type AuditResult = "success" | "failure" | "denied";
 

@@ -9,7 +9,7 @@ import { NextResponse } from "next/server";
 import { runDueSchedules } from "@/lib/scheduler";
 import { withIdempotency, pruneExpiredIdempotency } from "@/lib/idempotency";
 import { pruneExpiredRateLimits } from "@/lib/rate-limit";
-import { replayDlq } from "@/lib/audit";
+import { replayDlq, audit } from "@/lib/audit";
 import { pool } from "@/lib/db";
 import { recomputeDecayScores } from "@/lib/memory-compaction";
 
@@ -67,6 +67,16 @@ export async function GET(req: Request) {
       return { ...scheduleResult, sweptIdempotency, sweptRateLimits, dlqReplayed, dlqFailed, decayUsersUpdated };
     },
   );
+
+  // P32 — heartbeat audit so the Command Center "Last cron fire" stat
+  // populates. Fired once per cron tick (deduped by withIdempotency above
+  // so this only runs for the actual work-doing invocation).
+  if (!replayed) {
+    audit({
+      userId: null, action: "cron.tick", result: "success",
+      metadata: { minute, ...result },
+    }).catch(e => console.error("[cron tick audit]", e));
+  }
 
   return NextResponse.json({ ok: true, replayed, ...result });
 }

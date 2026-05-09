@@ -26,6 +26,7 @@ import { balance, chargeCredits, computeCost } from "@/lib/credits";
 import { startRun, endRun, TraceEmitter } from "@/lib/traces";
 import { detectLoop, truncateMessages, classifyError } from "@/lib/providers";
 import { setBudgetCap, chargeRunBudget, isOverBudget, DEFAULT_CHAT_TURN_BUDGET } from "@/lib/budget";
+import { isRunCancelled } from "@/lib/command-center";
 import { evaluateAllApplicable } from "@/lib/rubrics";
 import { recordFinding } from "@/lib/rubric-improvement";
 import { getEventsForRun } from "@/lib/traces";
@@ -228,6 +229,20 @@ export async function POST(req: Request) {
         const iterHistory: Array<{ text: string; toolSig: string }> = [];
 
         for (let iter = 0; iter < 6; iter++) {
+          // P32 — cooperative cancel. Operators can mark this run as
+          // cancelled via Command Center; we check between iterations and
+          // exit cleanly when we see the flag. The in-flight LLM stream
+          // (if any) finishes the token it's emitting first.
+          if (await isRunCancelled(runId)) {
+            emitter.emit("error", {
+              source: "command_center",
+              message: "Run cancelled by operator",
+              reason: "cancelled",
+            });
+            send({ type: "delta", text: `\n\n[Cancelled by operator.]` });
+            accumulatedText += `\n\n[Cancelled by operator.]`;
+            break;
+          }
           // P29 — context-overflow truncation. If our messages array would
           // exceed the model's window after the system prompt, truncate the
           // middle (oldest tool_results, oldest assistant turns) before sending.
@@ -411,8 +426,13 @@ export async function POST(req: Request) {
         // to the user.
         try {
           await emitter.flush();
+          // P32 — preserve operator-driven cancellation. If the run was
+          // marked cancelled mid-loop, don't overwrite that with 'succeeded'.
+          // We still record the partial cost so the cancelled run shows up
+          // in /costs with the credits actually burned.
+          const wasCancelled = await isRunCancelled(runId);
           await endRun(runId, {
-            status: "succeeded",
+            status: wasCancelled ? "cancelled" : "succeeded",
             totalInputTokens: totalIn,
             totalOutputTokens: totalOut,
             totalCacheReadTokens: totalCacheRead,

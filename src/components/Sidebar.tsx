@@ -6,14 +6,15 @@ import { ThemeToggle } from "./ThemeToggle";
 
 interface NavLink { href: string; label: string; icon: string; }
 const NAV: NavLink[] = [
-  { href: "/library",      label: "Library",      icon: "▤" },
-  { href: "/learning",     label: "Learning",     icon: "◇" },
-  { href: "/skills",       label: "Skills",       icon: "⚙" },
-  { href: "/integrations", label: "Integrations", icon: "⊟" },
-  { href: "/live",         label: "Live mode",    icon: "●" },
-  { href: "/costs",        label: "Costs",        icon: "$" },
-  { href: "/billing",      label: "Billing",      icon: "+" },
-  { href: "/settings",     label: "Settings",     icon: "⚙" },
+  { href: "/library",         label: "Library",        icon: "▤" },
+  { href: "/learning",        label: "Learning",       icon: "◇" },
+  { href: "/skills",          label: "Skills",         icon: "⚙" },
+  { href: "/integrations",    label: "Integrations",   icon: "⊟" },
+  { href: "/live",            label: "Live mode",      icon: "●" },
+  { href: "/command-center",  label: "Command Center", icon: "◉" },
+  { href: "/costs",           label: "Costs",          icon: "$" },
+  { href: "/billing",         label: "Billing",        icon: "+" },
+  { href: "/settings",        label: "Settings",       icon: "⚙" },
 ];
 
 export function Sidebar() {
