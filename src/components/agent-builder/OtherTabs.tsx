@@ -307,6 +307,10 @@ export function IntegrationsTab({ agent, onSave }: {
   const [connectors, setConnectors] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [bound, setBound] = useState<string[]>(agent.connectorIds || []);
+  // P47 — per-action allow-list per toolkit slug. Empty array / missing key
+  // = all actions allowed.
+  const [scopes, setScopes] = useState<Record<string, string[]>>(agent.connectorScopes || {});
+  const [permEditor, setPermEditor] = useState<string | null>(null);
   const toast = useToast();
 
   useEffect(() => {
@@ -321,7 +325,26 @@ export function IntegrationsTab({ agent, onSave }: {
       ? bound.filter(x => x !== slug)
       : [...bound, slug];
     setBound(next);
-    await onSave({ connectorIds: next });
+    // When unbinding, also drop the toolkit's scope entry to keep the JSON
+    // tidy. Re-binding starts from "all allowed" again.
+    let nextScopes = scopes;
+    if (!next.includes(slug) && scopes[slug]) {
+      nextScopes = { ...scopes };
+      delete nextScopes[slug];
+      setScopes(nextScopes);
+    }
+    await onSave({ connectorIds: next, connectorScopes: nextScopes });
+  }
+
+  async function saveScope(slug: string, allowed: string[]) {
+    const next = { ...scopes };
+    if (allowed.length === 0) {
+      delete next[slug];
+    } else {
+      next[slug] = allowed;
+    }
+    setScopes(next);
+    await onSave({ connectorScopes: next });
   }
 
   const connected = connectors.filter(c => c.connected);
@@ -331,7 +354,7 @@ export function IntegrationsTab({ agent, onSave }: {
     <div style={{ display: "flex", flexDirection: "column", gap: 18, maxWidth: 880 }}>
       <div>
         <h2 className="h-display" style={{ fontSize: 28, marginBottom: 4 }}>Integrations</h2>
-        <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Bind connector accounts to this agent. Tools from each connector become callable inside agent turns.</div>
+        <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Bind connector accounts to this agent. Tools from each connector become callable inside agent turns. Click a bound connector to scope it to specific actions.</div>
       </div>
 
       {loading ? (
@@ -343,7 +366,13 @@ export function IntegrationsTab({ agent, onSave }: {
               <h3 className="h-section" style={{ marginBottom: 8 }}>Connected ({connected.length})</h3>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }}>
                 {connected.map(c => (
-                  <ConnectorCard key={c.slug} c={c} bound={bound.includes(c.slug)} onToggle={() => toggle(c.slug)} />
+                  <ConnectorCard
+                    key={c.slug} c={c}
+                    bound={bound.includes(c.slug)}
+                    scopedCount={scopes[c.slug]?.length}
+                    onToggle={() => toggle(c.slug)}
+                    onConfigure={bound.includes(c.slug) ? () => setPermEditor(c.slug) : undefined}
+                  />
                 ))}
               </div>
             </div>
@@ -367,21 +396,44 @@ export function IntegrationsTab({ agent, onSave }: {
           </div>
         </>
       )}
+
+      {/* P47 — per-action permissioning modal */}
+      {permEditor && (
+        <PermissionsModal
+          slug={permEditor}
+          connector={connectors.find(c => c.slug === permEditor)}
+          allowed={scopes[permEditor] || []}
+          onClose={() => setPermEditor(null)}
+          onSave={async (next) => {
+            await saveScope(permEditor, next);
+            setPermEditor(null);
+            toast.success("Permissions updated", next.length === 0
+              ? "All actions are allowed for this connector."
+              : `${next.length} action${next.length === 1 ? "" : "s"} allowed.`);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function ConnectorCard({ c, bound, onToggle }: { c: any; bound: boolean; onToggle: () => void }) {
+function ConnectorCard({ c, bound, scopedCount, onToggle, onConfigure }: {
+  c: any; bound: boolean; scopedCount?: number;
+  onToggle: () => void; onConfigure?: () => void;
+}) {
   return (
-    <button onClick={onToggle} className="card"
+    <div className="card"
       style={{
-        padding: 12, textAlign: "left", cursor: "pointer",
+        padding: 12,
         borderColor: bound ? "var(--accent)" : "var(--border)",
         borderWidth: bound ? 2 : 1,
         background: bound ? "var(--accent-bg)" : "var(--bg-elev)",
         position: "relative",
       }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <button onClick={onToggle} style={{
+        all: "unset", display: "flex", alignItems: "center", gap: 10,
+        cursor: "pointer", width: "100%",
+      }}>
         <span style={{
           width: 32, height: 32, borderRadius: 7,
           background: c.color || "var(--bg-subtle)",
@@ -396,8 +448,152 @@ function ConnectorCard({ c, bound, onToggle }: { c: any; bound: boolean; onToggl
           </div>
         </div>
         {bound && <span style={{ fontSize: 14, color: "var(--accent)" }}>✓</span>}
+      </button>
+      {bound && onConfigure && (
+        <button onClick={onConfigure} style={{
+          marginTop: 8, fontSize: 11, padding: "3px 8px",
+          background: "transparent", border: "1px solid var(--border)",
+          color: "var(--text-muted)", borderRadius: 6, cursor: "pointer",
+          width: "100%",
+        }}>
+          {scopedCount && scopedCount > 0
+            ? `Scoped: ${scopedCount} action${scopedCount === 1 ? "" : "s"}`
+            : "All actions allowed"} <span style={{ marginLeft: 4 }}>⚙</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+// P47 — per-action permissioning modal. Lists every callable action in
+// the toolkit. Empty selection = all allowed (no scope written). Selected
+// subset = allow-list. Search box filters by name + description.
+function PermissionsModal({ slug, connector, allowed, onClose, onSave }: {
+  slug: string;
+  connector?: any;
+  allowed: string[];
+  onClose: () => void;
+  onSave: (allowed: string[]) => void | Promise<void>;
+}) {
+  const [actions, setActions] = useState<{ name: string; description: string }[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState<Set<string>>(new Set(allowed));
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/connectors/${encodeURIComponent(slug)}/actions`)
+      .then(r => r.json())
+      .then(j => { if (!cancelled) { setActions(j.actions || []); setLoading(false); } });
+    return () => { cancelled = true; };
+  }, [slug]);
+
+  function toggle(name: string) {
+    const next = new Set(selected);
+    if (next.has(name)) next.delete(name); else next.add(name);
+    setSelected(next);
+  }
+
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? actions.filter(a =>
+        a.name.toLowerCase().includes(q) ||
+        a.description.toLowerCase().includes(q))
+    : actions;
+
+  const allSelected = selected.size === 0 || selected.size === actions.length;
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)",
+      display: "grid", placeItems: "center", zIndex: 100,
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: "min(640px, 95vw)", maxHeight: "85vh",
+        background: "var(--bg)", borderRadius: 14,
+        border: "1px solid var(--border)",
+        display: "flex", flexDirection: "column", overflow: "hidden",
+      }}>
+        <div style={{ padding: "16px 20px", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+            {connector?.icon && (
+              <span style={{
+                width: 28, height: 28, borderRadius: 6,
+                background: connector.color || "var(--bg-subtle)",
+                color: connector.textColor || "var(--text)",
+                display: "grid", placeItems: "center", fontSize: 13, fontWeight: 700,
+              }}>{connector.icon}</span>
+            )}
+            <div style={{ fontSize: 16, fontWeight: 600 }}>
+              {connector?.name || slug} · permissions
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
+            Pick the specific actions this agent may invoke. Select none to allow every action (default).
+          </div>
+        </div>
+
+        <div style={{ padding: "10px 20px", borderBottom: "1px solid var(--border)",
+          display: "flex", alignItems: "center", gap: 10 }}>
+          <input value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Search actions…"
+            style={{
+              flex: 1, padding: "6px 10px", fontSize: 12,
+              border: "1px solid var(--border)", borderRadius: 6,
+              background: "var(--bg-subtle)", color: "var(--text)", outline: "none",
+            }}
+          />
+          <button onClick={() => setSelected(new Set())} className="btn"
+            style={{ fontSize: 11, padding: "5px 10px" }}>Clear</button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: "8px 4px" }}>
+          {loading ? (
+            <div style={{ padding: 20 }}><Skeleton height={28} style={{ marginBottom: 6 }} /><Skeleton height={28} style={{ marginBottom: 6 }} /><Skeleton height={28} /></div>
+          ) : filtered.length === 0 ? (
+            <div style={{ padding: 32, textAlign: "center", color: "var(--text-faint)", fontSize: 12 }}>
+              {actions.length === 0 ? "No actions returned for this toolkit." : "No matches."}
+            </div>
+          ) : filtered.map(a => (
+            <label key={a.name} style={{
+              display: "flex", alignItems: "flex-start", gap: 10,
+              padding: "8px 16px", cursor: "pointer",
+              borderRadius: 6, transition: "background 0.1s",
+            }} onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-subtle)")}
+               onMouseLeave={e => (e.currentTarget.style.background = "transparent")}>
+              <input type="checkbox" checked={selected.has(a.name)}
+                onChange={() => toggle(a.name)}
+                style={{ marginTop: 3 }}
+              />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontFamily: "JetBrains Mono, monospace", color: "var(--text)" }}>
+                  {a.name}
+                </div>
+                {a.description && (
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2, lineHeight: 1.4 }}>
+                    {a.description}
+                  </div>
+                )}
+              </div>
+            </label>
+          ))}
+        </div>
+
+        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)",
+          display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+            {selected.size === 0 ? `All ${actions.length} actions allowed`
+              : allSelected ? "All actions selected"
+              : `${selected.size} of ${actions.length} allowed`}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose} className="btn" style={{ fontSize: 12, padding: "5px 12px" }}>Cancel</button>
+            <button onClick={() => onSave(Array.from(selected))} className="btn btn-primary"
+              style={{ fontSize: 12, padding: "5px 14px" }}>Save</button>
+          </div>
+        </div>
       </div>
-    </button>
+    </div>
   );
 }
 

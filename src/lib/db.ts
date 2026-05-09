@@ -57,6 +57,13 @@ async function initSchema() {
     -- P41 — per-agent webhook signing secret. When set, /api/v1/agents/[id]/invoke
     -- accepts HMAC-signed requests as an alternative to bearer-token auth.
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS "webhookSecret" TEXT;
+    -- P47 — per-action connector scopes. JSON object: { [toolkitSlug]: string[] }
+    -- where the array is the allow-list of action names the agent may invoke.
+    -- Missing key OR empty array = all actions allowed (back-compat with the
+    -- existing connectorIds-only setup). When the agent has connectorIds set,
+    -- only those toolkits are exposed AT ALL — connectorScopes refines further
+    -- *within* each bound toolkit.
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS "connectorScopes" JSONB NOT NULL DEFAULT '{}'::jsonb;
     -- P41 — per-agent email inbound addresses. Each address routes incoming
     -- email to a specific agent. Address format: <slug>@<domain> (domain is
     -- platform-configured). Multiple addresses per agent allowed (e.g. one
@@ -513,9 +520,24 @@ export async function listArtifactVersions(artifactId: string): Promise<Array<{ 
 }
 
 // AGENTS
+// Helper: parse the connectorScopes column. Postgres JSONB returns the value
+// already-parsed, but we stay defensive in case of a string fallback.
+function parseConnectorScopes(v: any): Record<string, string[]> {
+  if (!v) return {};
+  if (typeof v === "string") {
+    try { return JSON.parse(v) || {}; } catch { return {}; }
+  }
+  return v as Record<string, string[]>;
+}
+
 export async function listAgents(userId: string): Promise<Agent[]> {
   const rows = await q<any>(`SELECT * FROM agents WHERE "userId"=$1 ORDER BY "createdAt"`, [userId]);
-  return rows.map(r => ({ ...r, tools: JSON.parse(r.tools), connectorIds: JSON.parse(r.connectorIds || "[]") }));
+  return rows.map(r => ({
+    ...r,
+    tools: JSON.parse(r.tools),
+    connectorIds: JSON.parse(r.connectorIds || "[]"),
+    connectorScopes: parseConnectorScopes(r.connectorScopes),
+  }));
 }
 export async function getAgent(id: string, userId: string): Promise<Agent | null> {
   const row = await qOne<any>(`SELECT * FROM agents WHERE id=$1 AND "userId"=$2`, [id, userId]);
@@ -524,6 +546,7 @@ export async function getAgent(id: string, userId: string): Promise<Agent | null
     ...row,
     tools: JSON.parse(row.tools),
     connectorIds: JSON.parse(row.connectorIds || "[]"),
+    connectorScopes: parseConnectorScopes(row.connectorScopes),
     extendedThinking: !!row.extendedThinking,
   };
 }
@@ -542,18 +565,21 @@ export async function updateAgent(id: string, userId: string, fields: Partial<Om
   const n = { ...cur, ...fields };
   // P36 — extended fields written in the same UPDATE so a single PATCH
   // covers builder edits across every tab.
+  // P47 — connectorScopes added; stored as JSONB.
   await q(
     `UPDATE agents SET
        "projectId"=$1, name=$2, icon=$3, color=$4, description=$5,
        "systemPrompt"=$6, tools=$7, "connectorIds"=$8, "routerHint"=$9,
        "modelId"=$10, "subagentModelId"=$11, "extendedThinking"=$12,
-       "maxRunBudgetCredits"=$13, avatar=$14
-     WHERE id=$15 AND "userId"=$16`,
+       "maxRunBudgetCredits"=$13, avatar=$14,
+       "connectorScopes"=$15::jsonb
+     WHERE id=$16 AND "userId"=$17`,
     [
       n.projectId, n.name, n.icon, n.color, n.description, n.systemPrompt,
       JSON.stringify(n.tools), JSON.stringify(n.connectorIds), n.routerHint,
       n.modelId ?? null, n.subagentModelId ?? null, !!n.extendedThinking,
       n.maxRunBudgetCredits ?? null, n.avatar ?? null,
+      JSON.stringify(n.connectorScopes || {}),
       id, userId,
     ],
   );

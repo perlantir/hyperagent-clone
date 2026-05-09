@@ -164,7 +164,11 @@ export async function POST(req: Request, { params }: { params: { id: string } })
   const { pinned: pinnedMemories, contextual: contextualMemories } =
     await retrieveMemoriesForChat(userId, agent.id, null, message);
   const toolNames = agent.tools?.length ? agent.tools : ["web_search", "generate_artifact"];
-  const { tools } = await resolveAllTools(userId, toolNames);
+  // P47 — honor connectorIds + per-action connectorScopes.
+  const { tools } = await resolveAllTools(userId, toolNames, {
+    connectorIds: agent.connectorIds,
+    connectorScopes: agent.connectorScopes,
+  });
 
   const segments = composeSystemPrompt({
     agent,

@@ -95,6 +95,12 @@ export interface Agent {
   extendedThinking?: boolean;          // toggle for Anthropic extended thinking
   maxRunBudgetCredits?: number | null; // per-run budget cap override
   avatar?: string | null;              // optional avatar URL
+  // P47 — per-action allow-list per toolkit. Missing key OR empty array =
+  // all actions allowed. Refines (does not replace) connectorIds.
+  connectorScopes?: Record<string, string[]>;
+  // P41 — webhook HMAC signing secret (whsec_<base64url>). When null, the
+  // /api/v1 webhook endpoint requires bearer-token auth.
+  webhookSecret?: string | null;
   createdAt: number;
 }
 

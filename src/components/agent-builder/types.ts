@@ -17,6 +17,10 @@ export interface AgentLike {
   extendedThinking?: boolean;
   maxRunBudgetCredits?: number | null;
   avatar?: string | null;
+  // P47 — per-action allow-list per toolkit slug. Empty array / missing key
+  // = all actions allowed (back-compat with the connectorIds-only setup).
+  connectorScopes?: Record<string, string[]>;
+  webhookSecret?: string | null;
   createdAt: number;
 }
 

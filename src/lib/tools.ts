@@ -1280,10 +1280,23 @@ export interface AnthropicTool {
 
 // Resolve all tools for a chat turn:
 //   - Always includes BUILTIN_TOOLS that match the agent's tool list
-//   - Adds Composio tools for any toolkits the user has connected
+//   - Adds Composio tools for any toolkits the user has connected, optionally
+//     intersected with the agent's connectorIds allow-list and per-toolkit
+//     action-scope filter.
+//
+// P47 — When connectorIds is non-empty, only those toolkits are exposed
+// (instead of every connected toolkit on the user account). When
+// connectorScopes[toolkit] is a non-empty array, only those specific action
+// names from that toolkit are exposed. Empty array / missing key = all
+// actions for that toolkit are allowed (back-compat with the connectorIds-
+// only setup before P47).
 export async function resolveAllTools(
   userId: string,
   agentToolNames: string[],
+  options?: {
+    connectorIds?: string[];
+    connectorScopes?: Record<string, string[]>;
+  },
 ): Promise<{ tools: AnthropicTool[]; composioToolNames: Set<string>; builtinTools: ToolDef[] }> {
   const builtinTools: ToolDef[] = [];
   for (const name of agentToolNames) {
@@ -1294,17 +1307,39 @@ export async function resolveAllTools(
   const connectedToolkits = Array.from(
     new Set(connected.map((c: any) => c.toolkit?.slug || c.appName || c.app_name).filter(Boolean)),
   ) as string[];
-  const composioTools = await getComposioTools(userId, connectedToolkits);
+
+  // P47 — narrow connected toolkits to the agent's allow-list when set.
+  // Toolkit slugs come back from Composio in lower-case; we match case-insensitively.
+  const allowed = (options?.connectorIds || []).map(s => s.toLowerCase());
+  const exposedToolkits = allowed.length === 0
+    ? connectedToolkits
+    : connectedToolkits.filter(t => allowed.includes(String(t).toLowerCase()));
+
+  const composioTools = await getComposioTools(userId, exposedToolkits);
+
+  // P47 — apply per-action allow-list. Composio action names look like
+  // "GMAIL_SEND_EMAIL"; toolkit slugs are lower-case ("gmail"). Match the
+  // action's prefix (everything up to the first underscore) against the
+  // toolkit slug to figure out which scope list applies.
+  const scopes = options?.connectorScopes || {};
+  const filteredComposioTools = composioTools.filter((t: any) => {
+    const name: string = t.name || "";
+    const prefix = name.split("_")[0]?.toLowerCase();
+    if (!prefix) return true;
+    const scope = scopes[prefix] || scopes[prefix.toUpperCase()];
+    if (!scope || scope.length === 0) return true; // no scope → allow all
+    return scope.includes(name);
+  });
 
   const tools: AnthropicTool[] = [
     ...builtinTools.map(t => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
-    ...composioTools.map((t: any) => ({
+    ...filteredComposioTools.map((t: any) => ({
       name: t.name,
       description: t.description || "",
       input_schema: t.input_schema || t.inputSchema || { type: "object", properties: {} },
     })),
   ];
-  const composioToolNames = new Set(composioTools.map((t: any) => t.name));
+  const composioToolNames = new Set(filteredComposioTools.map((t: any) => t.name));
   return { tools, composioToolNames, builtinTools };
 }
 

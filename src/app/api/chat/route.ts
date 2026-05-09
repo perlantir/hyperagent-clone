@@ -95,8 +95,13 @@ export async function POST(req: Request) {
   const agent = agentId ? await getAgent(agentId, user.id) : null;
 
   // Resolve tools first so we can inject toolNames into the prompt.
+  // P47 — pass agent.connectorIds + agent.connectorScopes so the agent only
+  // sees the toolkits it's been bound to, with per-action filtering applied.
   const toolNames = agent?.tools?.length ? agent.tools : ["web_search", "generate_artifact"];
-  const { tools, composioToolNames, builtinTools } = await resolveAllTools(user.id, toolNames);
+  const { tools, composioToolNames, builtinTools } = await resolveAllTools(user.id, toolNames, {
+    connectorIds: agent?.connectorIds,
+    connectorScopes: agent?.connectorScopes,
+  });
 
   // P23 — Build the layered system prompt via compiler.
   // composeSystemPrompt produces a PromptSegment[] which compilePrompt turns

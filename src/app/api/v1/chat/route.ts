@@ -98,7 +98,11 @@ export async function POST(req: Request) {
   const { pinned: pinnedMemories, contextual: contextualMemories } =
     await retrieveMemoriesForChat(userId, agentId, null, message);
   const toolNames = agent?.tools || ["web_search", "generate_artifact"];
-  const { tools } = await resolveAllTools(userId, toolNames);
+  // P47 — honor agent's connectorIds + per-action connectorScopes.
+  const { tools } = await resolveAllTools(userId, toolNames, {
+    connectorIds: agent?.connectorIds,
+    connectorScopes: agent?.connectorScopes,
+  });
 
   // P23 — layered prompt with cache_control breakpoints.
   const segments = composeSystemPrompt({

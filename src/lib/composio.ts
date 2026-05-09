@@ -214,11 +214,19 @@ export interface ComposioToolSchema {
 const _toolsCache = new Map<string, { ts: number; data: ComposioToolSchema[] }>();
 const TOOLS_TTL_MS = 30 * 60 * 1000;
 
-async function listToolsForToolkit(userId: string | null, toolkitSlug: string): Promise<ComposioToolSchema[]> {
-  const cached = _toolsCache.get(toolkitSlug);
+// Exported so the per-action permissioning UI (P47) can list every action
+// for a connector. Higher cap there because the user wants the FULL action
+// list to pick from, not the LLM-budget-friendly subset.
+export async function listToolsForToolkit(
+  userId: string | null,
+  toolkitSlug: string,
+  limit: number = 50,
+): Promise<ComposioToolSchema[]> {
+  const cacheKey = `${toolkitSlug}:${limit}`;
+  const cached = _toolsCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < TOOLS_TTL_MS) return cached.data;
   try {
-    const params = new URLSearchParams({ toolkit_slugs: toolkitSlug, limit: "50" });
+    const params = new URLSearchParams({ toolkit_slugs: toolkitSlug, limit: String(limit) });
     const j = await composioFetch(userId, `/api/v3/tools?${params}`);
     const items: any[] = j.items || [];
     const out: ComposioToolSchema[] = items.map(t => ({
@@ -228,7 +236,7 @@ async function listToolsForToolkit(userId: string | null, toolkitSlug: string): 
       input_schema: t.input_parameters || t.input_schema || { type: "object", properties: {} },
       toolkit_slug: t.toolkit?.slug || toolkitSlug,
     }));
-    _toolsCache.set(toolkitSlug, { ts: Date.now(), data: out });
+    _toolsCache.set(cacheKey, { ts: Date.now(), data: out });
     return out;
   } catch (e: any) {
     console.error(`[listToolsForToolkit ${toolkitSlug}]`, e.message);
