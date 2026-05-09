@@ -18,6 +18,7 @@ export const SETTINGS_SECTIONS: SectionDef[] = [
   { id: "integrations",    label: "Integrations",    description: "OAuth to 250+ third-party services.",            icon: "⊟" },
   { id: "models",          label: "Models",          description: "Default chat / image / video / TTS providers.",   icon: "✶" },
   { id: "api-keys",        label: "API Keys",        description: "Public hak_ keys + bring-your-own provider keys.", icon: "🔑" },
+  { id: "codex",           label: "Codex / OpenAI",  description: "Provider mode + ChatGPT Sign-In (experimental).",  icon: "◈" },
   { id: "sandbox",         label: "Sandbox",         description: "Domain allowlist + concurrency caps.",            icon: "▢" },
   { id: "slack",           label: "Slack",           description: "Inbound Slack workspaces.",                       icon: "#" },
   { id: "notifications",   label: "Notifications",   description: "Browser push for background activity.",           icon: "◔" },

@@ -14,7 +14,11 @@
     "test:rubric": "npx tsx src/lib/__tests__/rubric-deterministic.test.ts",
     "test:security": "npx tsx src/lib/__tests__/security.test.ts",
     "test:sandbox-policy": "npx tsx src/lib/__tests__/sandbox-policy.test.ts",
-    "test:all": "npm run test:prompt && npm run test:providers && npm run test:working-memory && npm run test:embeddings && npm run test:rubric && npm run test:security && npm run test:sandbox-policy"
+    "test:codex-redact": "npx tsx src/lib/__tests__/codex-redact.test.ts",
+    "test:codex-provider-mode": "npx tsx src/lib/__tests__/codex-provider-mode.test.ts",
+    "test:codex-app-server": "npx tsx src/lib/__tests__/codex-app-server.test.ts",
+    "test:codex": "npm run test:codex-redact && npm run test:codex-provider-mode && npm run test:codex-app-server",
+    "test:all": "npm run test:prompt && npm run test:providers && npm run test:working-memory && npm run test:embeddings && npm run test:rubric && npm run test:security && npm run test:sandbox-policy && npm run test:codex"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.27.3",
