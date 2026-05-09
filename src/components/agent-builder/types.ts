@@ -21,6 +21,9 @@ export interface AgentLike {
   // = all actions allowed (back-compat with the connectorIds-only setup).
   connectorScopes?: Record<string, string[]>;
   webhookSecret?: string | null;
+  // P52 — skills bound to this agent. Each contributes its
+  // systemPromptAddition to the agent's compiled prompt at chat time.
+  skillIds?: string[];
   createdAt: number;
 }
 

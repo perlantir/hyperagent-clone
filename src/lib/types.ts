@@ -105,6 +105,9 @@ export interface Agent {
   // P41 — webhook HMAC signing secret (whsec_<base64url>). When null, the
   // /api/v1 webhook endpoint requires bearer-token auth.
   webhookSecret?: string | null;
+  // P52 — per-agent skill binding. Each bound skill's systemPromptAddition
+  // is appended to the agent's prompt at compile time.
+  skillIds?: string[];
   createdAt: number;
 }
 

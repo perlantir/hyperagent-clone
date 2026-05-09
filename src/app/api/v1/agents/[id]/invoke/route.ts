@@ -170,12 +170,23 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     connectorScopes: agent.connectorScopes,
   });
 
+  // P52 — bound skills.
+  let boundSkills: Array<{ id: string; name: string; systemPromptAddition: string }> = [];
+  if (agent.skillIds && agent.skillIds.length > 0) {
+    const { getSkill } = await import("@/lib/db");
+    const fetched = await Promise.all(agent.skillIds.map((sid: string) => getSkill(sid)));
+    boundSkills = fetched.filter((s): s is any => !!s).map((s: any) => ({
+      id: s.id, name: s.name, systemPromptAddition: s.systemPromptAddition || "",
+    }));
+  }
+
   const segments = composeSystemPrompt({
     agent,
     toolNames: tools.map((t: any) => t.name),
     pinnedMemories,
     contextualMemories,
     threadContextDocId: threadId,
+    skills: boundSkills,
   });
   const compiled = compilePrompt(segments, { maxTokens: 16_000 });
   const systemBlocks = compiled.systemBlocks;

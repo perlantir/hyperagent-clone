@@ -145,6 +145,18 @@ export async function POST(req: Request) {
     }
   }
 
+  // P52 — pull bound skills so their systemPromptAddition gets composed
+  // into the prompt. agent.skillIds is empty by default (no skills apply);
+  // when populated, only those skills affect the prompt.
+  let boundSkills: Array<{ id: string; name: string; systemPromptAddition: string }> = [];
+  if (agent && agent.skillIds && agent.skillIds.length > 0) {
+    const { getSkill } = await import("@/lib/db");
+    const fetched = await Promise.all(agent.skillIds.map((sid: string) => getSkill(sid)));
+    boundSkills = fetched.filter((s): s is any => !!s).map((s: any) => ({
+      id: s.id, name: s.name, systemPromptAddition: s.systemPromptAddition || "",
+    }));
+  }
+
   const { composeSystemPrompt } = await import("@/lib/prompt-segments");
   const { compilePrompt } = await import("@/lib/prompt-compiler");
   const segments = composeSystemPrompt({
@@ -154,6 +166,7 @@ export async function POST(req: Request) {
     contextualMemories,
     threadContextDocId: threadId,
     knowledgeChunks,
+    skills: boundSkills,
   });
   const compiled = compilePrompt(segments, {
     maxTokens: 16_000, // generous cap; layered prompt should fit comfortably

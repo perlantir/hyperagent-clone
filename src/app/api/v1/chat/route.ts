@@ -104,6 +104,16 @@ export async function POST(req: Request) {
     connectorScopes: agent?.connectorScopes,
   });
 
+  // P52 — pull bound skills for prompt composition.
+  let boundSkills: Array<{ id: string; name: string; systemPromptAddition: string }> = [];
+  if (agent && agent.skillIds && agent.skillIds.length > 0) {
+    const { getSkill } = await import("@/lib/db");
+    const fetched = await Promise.all(agent.skillIds.map((sid: string) => getSkill(sid)));
+    boundSkills = fetched.filter((s): s is any => !!s).map((s: any) => ({
+      id: s.id, name: s.name, systemPromptAddition: s.systemPromptAddition || "",
+    }));
+  }
+
   // P23 — layered prompt with cache_control breakpoints.
   const segments = composeSystemPrompt({
     agent,
@@ -111,6 +121,7 @@ export async function POST(req: Request) {
     pinnedMemories,
     contextualMemories,
     threadContextDocId: threadId,
+    skills: boundSkills,
   });
   const compiled = compilePrompt(segments, { maxTokens: 16_000 });
   const systemBlocks = compiled.systemBlocks;

@@ -68,6 +68,10 @@ async function initSchema() {
     -- IS NULL by default; "Show archived" reveals the archived rows.
     ALTER TABLE threads ADD COLUMN IF NOT EXISTS "archivedAt" BIGINT;
     CREATE INDEX IF NOT EXISTS idx_threads_user_archived ON threads("userId", "archivedAt", "updatedAt" DESC);
+    -- P52 — per-agent skill binding. Empty array = no skills apply.
+    -- The agent's systemPrompt is composed with each bound skill's
+    -- systemPromptAddition appended at compile time.
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS "skillIds" JSONB NOT NULL DEFAULT '[]'::jsonb;
     -- P41 — per-agent email inbound addresses. Each address routes incoming
     -- email to a specific agent. Address format: <slug>@<domain> (domain is
     -- platform-configured). Multiple addresses per agent allowed (e.g. one
@@ -545,6 +549,14 @@ function parseConnectorScopes(v: any): Record<string, string[]> {
   }
   return v as Record<string, string[]>;
 }
+// P52 — same defensive parser for skillIds (JSONB array).
+function parseSkillIds(v: any): string[] {
+  if (!v) return [];
+  if (typeof v === "string") {
+    try { const p = JSON.parse(v); return Array.isArray(p) ? p : []; } catch { return []; }
+  }
+  return Array.isArray(v) ? v : [];
+}
 
 export async function listAgents(userId: string): Promise<Agent[]> {
   const rows = await q<any>(`SELECT * FROM agents WHERE "userId"=$1 ORDER BY "createdAt"`, [userId]);
@@ -553,6 +565,7 @@ export async function listAgents(userId: string): Promise<Agent[]> {
     tools: JSON.parse(r.tools),
     connectorIds: JSON.parse(r.connectorIds || "[]"),
     connectorScopes: parseConnectorScopes(r.connectorScopes),
+    skillIds: parseSkillIds(r.skillIds),
   }));
 }
 export async function getAgent(id: string, userId: string): Promise<Agent | null> {
@@ -563,6 +576,7 @@ export async function getAgent(id: string, userId: string): Promise<Agent | null
     tools: JSON.parse(row.tools),
     connectorIds: JSON.parse(row.connectorIds || "[]"),
     connectorScopes: parseConnectorScopes(row.connectorScopes),
+    skillIds: parseSkillIds(row.skillIds),
     extendedThinking: !!row.extendedThinking,
   };
 }
@@ -582,20 +596,21 @@ export async function updateAgent(id: string, userId: string, fields: Partial<Om
   // P36 — extended fields written in the same UPDATE so a single PATCH
   // covers builder edits across every tab.
   // P47 — connectorScopes added; stored as JSONB.
+  // P52 — skillIds added; stored as JSONB array.
   await q(
     `UPDATE agents SET
        "projectId"=$1, name=$2, icon=$3, color=$4, description=$5,
        "systemPrompt"=$6, tools=$7, "connectorIds"=$8, "routerHint"=$9,
        "modelId"=$10, "subagentModelId"=$11, "extendedThinking"=$12,
        "maxRunBudgetCredits"=$13, avatar=$14,
-       "connectorScopes"=$15::jsonb
-     WHERE id=$16 AND "userId"=$17`,
+       "connectorScopes"=$15::jsonb, "skillIds"=$16::jsonb
+     WHERE id=$17 AND "userId"=$18`,
     [
       n.projectId, n.name, n.icon, n.color, n.description, n.systemPrompt,
       JSON.stringify(n.tools), JSON.stringify(n.connectorIds), n.routerHint,
       n.modelId ?? null, n.subagentModelId ?? null, !!n.extendedThinking,
       n.maxRunBudgetCredits ?? null, n.avatar ?? null,
-      JSON.stringify(n.connectorScopes || {}),
+      JSON.stringify(n.connectorScopes || {}), JSON.stringify(n.skillIds || []),
       id, userId,
     ],
   );

@@ -112,6 +112,23 @@ ${agent.systemPrompt}`,
     { priority: 85, source: `agent/${agent.id}/v${(agent as any).version || 1}`, version: 1 });
 }
 
+// P52 — Skill prompt additions.
+// Each agent.skillIds entry resolves to a skill row whose
+// systemPromptAddition is appended verbatim. Sectioned per-skill so it
+// stays readable when 3+ skills are bound.
+export function skillsSegment(skills: Array<{ id: string; name: string; systemPromptAddition: string }>): PromptSegment | null {
+  if (!skills.length) return null;
+  const sections = skills
+    .filter(s => s.systemPromptAddition && s.systemPromptAddition.trim())
+    .map(s => `### Skill: ${s.name}\n${s.systemPromptAddition.trim()}`);
+  if (sections.length === 0) return null;
+  return segment("skills",
+`AGENT SKILLS — applied prompt additions:
+
+${sections.join("\n\n")}`,
+    { priority: 84, source: `skills/${skills.map(s => s.id).sort().join(",")}`, version: 1 });
+}
+
 export function workingMemoryHintSegment(threadContextDocId: string | null): PromptSegment | null {
   if (!threadContextDocId) return null;
   return segment("working_memory_hint",
@@ -177,6 +194,9 @@ export interface ComposeContext {
   threadContextDocId: string | null;
   // P40 — top-K retrieved knowledge chunks (per-agent docs).
   knowledgeChunks?: Array<{ docTitle: string; chunkIdx: number; content: string; similarity: number }>;
+  // P52 — skills bound to this agent. Each contributes its
+  // systemPromptAddition to the compiled prompt.
+  skills?: Array<{ id: string; name: string; systemPromptAddition: string }>;
 }
 
 // Top-level builder used by chat routes. Returns the segment array ready for
@@ -192,6 +212,7 @@ export function composeSystemPrompt(ctx: ComposeContext): PromptSegment[] {
     outputFormatSegment(),
     metaAwarenessSegment(),
     agentConfigSegment(ctx.agent),
+    skillsSegment(ctx.skills || []),
     workingMemoryHintSegment(ctx.threadContextDocId),
     memoryPinnedSegment(ctx.pinnedMemories),
     memoryContextualSegment(ctx.contextualMemories),

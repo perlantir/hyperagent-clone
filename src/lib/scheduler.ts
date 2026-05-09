@@ -76,6 +76,16 @@ async function runSchedule(scheduleId: string) {
       connectorScopes: agent.connectorScopes,
     });
 
+    // P52 — bound skills feed into the same prompt segment as chat.
+    let boundSkills: Array<{ id: string; name: string; systemPromptAddition: string }> = [];
+    if (agent.skillIds && agent.skillIds.length > 0) {
+      const { getSkill } = await import("./db");
+      const fetched = await Promise.all(agent.skillIds.map((sid: string) => getSkill(sid)));
+      boundSkills = fetched.filter((s): s is any => !!s).map((s: any) => ({
+        id: s.id, name: s.name, systemPromptAddition: s.systemPromptAddition || "",
+      }));
+    }
+
     // P23 + P25 — layered prompt + T1/T2 memory retrieval. The schedule's
     // prompt is the cosine query — usually a recurring instruction so its
     // contextual matches will be stable across runs.
@@ -87,6 +97,7 @@ async function runSchedule(scheduleId: string) {
       pinnedMemories,
       contextualMemories,
       threadContextDocId: null,
+      skills: boundSkills,
     });
     const compiled = compilePrompt(segments, { maxTokens: 16_000 });
     emitter.setDefaultMetadata({

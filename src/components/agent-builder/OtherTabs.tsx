@@ -14,6 +14,134 @@ import { Skeleton } from "@/components/Skeleton";
 import type { AgentLike } from "./types";
 import { NATIVE_TOOL_CATALOG } from "./types";
 
+// ============ Slack inline binder (P52) ============
+//
+// Replaces the "Manage workspaces" → /settings redirect that frustrated
+// users on the agent builder. Lets them:
+//   - Kick off Composio's Slack OAuth in a new tab (for outbound tools)
+//   - Bind a workspace inline by entering teamId + bot token (needed for
+//     inbound webhook routing — Composio doesn't proxy slack/events)
+//   - Unbind a previously-bound workspace
+// All without leaving the builder.
+
+function SlackBinder({ agentId, workspaces, onChanged }: {
+  agentId: string;
+  workspaces: any[];
+  onChanged: () => void;
+}) {
+  const toast = useToast();
+  const [showForm, setShowForm] = useState(false);
+  const [teamId, setTeamId] = useState("");
+  const [botToken, setBotToken] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function startOAuth() {
+    setBusy(true);
+    try {
+      const r = await fetch("/api/connectors/slack", { method: "POST" });
+      const j = await r.json();
+      if (j.redirectUrl || j.url) {
+        window.open(j.redirectUrl || j.url, "_blank", "noopener");
+        toast.info("Slack OAuth opened", "Approve in the new tab. After Composio confirms the connection, return here and click Add workspace.");
+      } else {
+        toast.error("OAuth start failed", j.error || "no redirect URL returned");
+      }
+    } catch (e: any) {
+      toast.error("OAuth start failed", e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function bind() {
+    if (!teamId.trim() || !botToken.trim()) return;
+    setBusy(true);
+    const r = await fetch("/api/settings/slack-workspaces", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ teamId: teamId.trim(), botToken: botToken.trim(), agentId }),
+    });
+    const j = await r.json();
+    setBusy(false);
+    if (r.ok) {
+      toast.success("Slack workspace bound", "Inbound messages will route to this agent.");
+      setTeamId(""); setBotToken(""); setShowForm(false);
+      onChanged();
+    } else {
+      toast.error("Bind failed", j.error || "");
+    }
+  }
+
+  async function unbind(tid: string) {
+    setBusy(true);
+    const r = await fetch(`/api/settings/slack-workspaces/${encodeURIComponent(tid)}`, { method: "DELETE" });
+    setBusy(false);
+    if (r.ok) { toast.success("Unbound"); onChanged(); }
+    else toast.error("Unbind failed");
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      {workspaces.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {workspaces.map(w => (
+            <div key={w.teamId} style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "6px 10px", background: "var(--bg-subtle)",
+              borderRadius: 6, fontSize: 12,
+            }}>
+              <code className="mono" style={{ flex: 1, fontSize: 11.5 }}>{w.teamId}</code>
+              <span style={{ fontSize: 10.5, color: "var(--text-faint)" }}>
+                token {w.botTokenRedacted}
+              </span>
+              <button className="btn" disabled={busy} onClick={() => unbind(w.teamId)}
+                style={{ fontSize: 11, padding: "3px 9px" }}>
+                Unbind
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button className="btn btn-primary" disabled={busy} onClick={startOAuth}
+          style={{ fontSize: 11, padding: "5px 12px" }}>
+          + Connect Slack (OAuth)
+        </button>
+        <button className="btn" disabled={busy} onClick={() => setShowForm(s => !s)}
+          style={{ fontSize: 11, padding: "5px 12px" }}>
+          {showForm ? "Hide manual bind" : "Bind workspace manually"}
+        </button>
+      </div>
+
+      {showForm && (
+        <div style={{ padding: 10, background: "var(--bg-subtle)", borderRadius: 6, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
+            For inbound webhooks (events from Slack), provide your Slack app&apos;s Team ID and bot token.
+            Configure your Slack app&apos;s Event Subscriptions to <code className="mono">{typeof window !== "undefined" ? window.location.origin : ""}/api/slack/events</code> and subscribe to <code className="mono">message.channels</code> + <code className="mono">app_mention</code>.
+          </div>
+          <input value={teamId} onChange={e => setTeamId(e.target.value)} placeholder="T01ABCDEFGH (Slack Team ID)"
+            style={{
+              padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6,
+              background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none",
+            }} />
+          <input value={botToken} onChange={e => setBotToken(e.target.value)} placeholder="xoxb-… (Slack bot token)"
+            style={{
+              padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6,
+              background: "var(--bg)", color: "var(--text)", fontSize: 12, outline: "none",
+              fontFamily: "JetBrains Mono, monospace",
+            }} />
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button className="btn btn-primary" disabled={busy || !teamId.trim() || !botToken.trim()}
+              onClick={bind} style={{ fontSize: 11, padding: "5px 12px" }}>
+              Bind to this agent
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============ Invocations Tab ============
 //
 // Shows all five trigger channels. Thread = always available; Webhook is
@@ -201,14 +329,10 @@ export function InvocationsTab({ agent }: { agent: AgentLike }) {
 
       <ChannelRow
         title="Slack"
-        sub="Inbound messages from a connected Slack workspace route to this agent."
+        sub="Connect a Slack workspace and bind it to this agent — inbound messages route here, outbound replies use the bot token."
         status={slackWorkspaces.length > 0 ? "active" : "inactive"}
-        statusLabel={slackWorkspaces.length > 0 ? `${slackWorkspaces.length} CONNECTED` : "NOT BOUND"}
-        body={
-          <Link href="/settings" className="btn" style={{ fontSize: 11, padding: "5px 12px" }}>
-            Manage workspaces
-          </Link>
-        }
+        statusLabel={slackWorkspaces.length > 0 ? `${slackWorkspaces.length} BOUND` : "NOT BOUND"}
+        body={<SlackBinder agentId={agent.id} workspaces={slackWorkspaces} onChanged={reload} />}
       />
 
       <ChannelRow
@@ -697,18 +821,56 @@ export function MemoryTab({ agent }: { agent: AgentLike }) {
   );
 }
 
-// ============ Skills Tab ============
+// ============ Skills Tab (P52 — toggleable per-agent binding) ============
 
-export function SkillsTab({ agent }: { agent: AgentLike }) {
+export function SkillsTab({ agent, onSave }: {
+  agent: AgentLike;
+  onSave?: (patch: Partial<AgentLike>) => Promise<void>;
+}) {
+  const toast = useToast();
   const [skills, setSkills] = useState<any[]>([]);
+  const [bound, setBound] = useState<string[]>(agent.skillIds || []);
+  const [saving, setSaving] = useState(false);
+
   useEffect(() => {
     fetch("/api/skills").then(r => r.json()).then(j => setSkills(j.skills || []));
   }, []);
+
+  // Keep bound state in sync if the agent prop changes (e.g. after a save).
+  useEffect(() => { setBound(agent.skillIds || []); }, [agent.id, agent.skillIds]);
+
+  async function toggle(id: string) {
+    if (!onSave) return;
+    const next = bound.includes(id) ? bound.filter(x => x !== id) : [...bound, id];
+    setBound(next);
+    setSaving(true);
+    try {
+      await onSave({ skillIds: next });
+      toast.success(bound.includes(id) ? "Skill unbound" : "Skill bound", "Will apply on the next agent turn.");
+    } catch {
+      // Revert on failure so the UI doesn't lie.
+      setBound(bound);
+      toast.error("Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // Group by category for a slightly more browsable layout.
+  const byCategory: Record<string, any[]> = {};
+  for (const s of skills) {
+    const c = s.category || "Other";
+    (byCategory[c] = byCategory[c] || []).push(s);
+  }
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 800 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 18, maxWidth: 880 }}>
       <div>
         <h2 className="h-display" style={{ fontSize: 28, marginBottom: 4 }}>Skills</h2>
-        <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Reusable system-prompt additions. {skills.length} installed.</div>
+        <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
+          Reusable system-prompt additions. {bound.length} bound · {skills.length} installed.
+          When bound, each skill&apos;s prompt addition feeds into this agent&apos;s system prompt.
+        </div>
       </div>
       {skills.length === 0 ? (
         <EmptyState
@@ -718,16 +880,35 @@ export function SkillsTab({ agent }: { agent: AgentLike }) {
           ctaHref="/skills"
         />
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
-          {skills.map(s => (
-            <div key={s.id} className="card" style={{ padding: 12 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{s.name}</div>
-              <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 4 }}>{s.description}</div>
-              <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 6 }}>{s.category}</div>
+        Object.entries(byCategory).map(([cat, list]) => (
+          <div key={cat}>
+            <h3 className="h-section" style={{ marginBottom: 10 }}>{cat}</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 10 }}>
+              {list.map((s: any) => {
+                const isBound = bound.includes(s.id);
+                return (
+                  <button key={s.id} onClick={() => toggle(s.id)} disabled={saving} className="card"
+                    style={{
+                      padding: 12, textAlign: "left", cursor: saving ? "wait" : "pointer",
+                      borderColor: isBound ? "var(--accent)" : "var(--border)",
+                      borderWidth: isBound ? 2 : 1,
+                      background: isBound ? "var(--accent-bg)" : "var(--bg-elev)",
+                    }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{s.name}</div>
+                      {isBound && <span style={{ fontSize: 12, color: "var(--accent)" }}>✓</span>}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.4 }}>{s.description}</div>
+                  </button>
+                );
+              })}
             </div>
-          ))}
-        </div>
+          </div>
+        ))
       )}
+      <Link href="/skills" className="btn" style={{ alignSelf: "flex-start", fontSize: 12, padding: "6px 14px" }}>
+        Browse skill templates →
+      </Link>
     </div>
   );
 }

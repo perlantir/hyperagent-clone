@@ -77,9 +77,19 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
 
     const { pinned: pinnedMemories, contextual: contextualMemories } =
       await retrieveMemoriesForChat(s.userId, agent.id, null, s.prompt);
+    // P52 — pull bound skills.
+    let boundSkills: Array<{ id: string; name: string; systemPromptAddition: string }> = [];
+    if (agent.skillIds && agent.skillIds.length > 0) {
+      const { getSkill } = await import("@/lib/db");
+      const fetched = await Promise.all(agent.skillIds.map((sid: string) => getSkill(sid)));
+      boundSkills = fetched.filter((s): s is any => !!s).map((s: any) => ({
+        id: s.id, name: s.name, systemPromptAddition: s.systemPromptAddition || "",
+      }));
+    }
     const segments = composeSystemPrompt({
       agent, toolNames: tools.map((t: any) => t.name),
       pinnedMemories, contextualMemories, threadContextDocId: null,
+      skills: boundSkills,
     });
     const compiled = compilePrompt(segments, { maxTokens: 16_000 });
     emitter.setDefaultMetadata({ promptFingerprint: compiled.fingerprint, agentId: agent.id });

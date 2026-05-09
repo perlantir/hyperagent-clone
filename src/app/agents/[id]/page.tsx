@@ -224,7 +224,7 @@ export default function AgentBuilderPage({ params }: { params: { id: string } })
             ) : tab === "tools" ? (
               <ToolsTab agent={agent} onSave={save} />
             ) : tab === "skills" ? (
-              <SkillsTab agent={agent} />
+              <SkillsTab agent={agent} onSave={save} />
             ) : tab === "knowledge" ? (
               <KnowledgeTab agent={agent} />
             ) : tab === "memory" ? (
