@@ -21,16 +21,26 @@ export async function GET() {
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const cfg = await getBridgeConfig(user.id);
   if (!cfg) return NextResponse.json({ configured: false });
-  // Show URL host but NEVER the capability token. Last 4 chars of the
-  // token are fine as a "this is the active token" indicator.
   let host = "";
-  try { host = new URL(cfg.url).host; } catch {}
+  // P64.1 — for browser-direct bridges, return the FULL URL so the
+  // browser can connect. The URL itself contains no secret (the token
+  // is separate), but it does carry the user's chosen port. We deliberately
+  // mask the token tail to the last 4 chars and never include the
+  // raw token in any response.
+  let url = "";
+  try {
+    const u = new URL(cfg.url);
+    host = u.host;
+    url = cfg.url;
+  } catch {}
   const tokenTail = cfg.capabilityToken.slice(-4);
   return NextResponse.json({
     configured: true,
     host,
+    url, // browser uses this for browser-direct connections
     tokenTail,
     experimentalApi: !!cfg.experimentalApi,
+    connectionLocation: cfg.connectionLocation || "browser",
   });
 }
 
@@ -38,16 +48,26 @@ export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const body = await req.json().catch(() => ({}));
-  const { url, capabilityToken, experimentalApi } = body || {};
+  const { url, capabilityToken, experimentalApi, connectionLocation } = body || {};
   if (typeof url !== "string" || typeof capabilityToken !== "string") {
     return NextResponse.json({ error: "url and capabilityToken are required" }, { status: 400 });
   }
+  // P64.1 — connectionLocation is required from the UI. Default to
+  // "browser" only when not specified (back-compat with older clients).
+  const loc = connectionLocation === "tunnel" || connectionLocation === "local-server"
+    ? connectionLocation
+    : "browser";
   try {
-    await setBridgeConfig(user.id, { url, capabilityToken, experimentalApi: !!experimentalApi });
+    await setBridgeConfig(user.id, {
+      url,
+      capabilityToken,
+      experimentalApi: !!experimentalApi,
+      connectionLocation: loc,
+    });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Failed to save" }, { status: 400 });
   }
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, connectionLocation: loc });
 }
 
 export async function DELETE() {

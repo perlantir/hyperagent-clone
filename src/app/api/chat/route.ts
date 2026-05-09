@@ -407,10 +407,36 @@ Do not skip the planning step even if the request seems simple.`,
           } else if (providerMode === "codexChatGPTCompanion") {
             codexErr = "Codex Companion mode talks directly browser↔companion. Server-side chat dispatch isn't reachable in this mode — open the thread in the UI to use it.";
           } else {
-            // Phase 1 — bridge.
+            // Phase 1 — bridge. Server-side dispatch only works for
+            // tunnel / local-server bridges. browser-direct can't be
+            // dispatched from the hosted server (the URL is the user's
+            // loopback, unreachable from Vercel). Surface a clear error
+            // pointing the user at browser-driven dispatch (P65).
             bridge = await getBridgeConfig(user.id);
             if (!bridge) {
               codexErr = "Codex Bridge mode is selected, but no bridge is configured. Open Settings → Chat provider → Codex Bridge to paste your bridge URL + token.";
+            } else {
+              const loc = bridge.connectionLocation || "browser";
+              if (loc === "browser") {
+                codexErr = "This bridge is configured as browser-direct, which means the connection must originate from your browser tab. Server-side chat dispatch can't reach your laptop's loopback URL. Either switch to a Tunnel-mode bridge (public URL with capability token) or wait for browser-direct chat dispatch (P65).";
+              } else if (loc === "local-server" && (process.env.VERCEL || process.env.VERCEL_ENV)) {
+                codexErr = "local-server bridge mode is not available on hosted Vercel — pick browser or tunnel.";
+              } else if (loc === "tunnel") {
+                // Re-validate at request time. The write-time validator
+                // ran against this exact URL, but env may have changed.
+                const { validateForServerSideFetch, verifyResolvedIp } = await import("@/lib/codex/url-safety");
+                const v = validateForServerSideFetch(bridge.url);
+                if (!v.ok) {
+                  codexErr = v.reason;
+                } else {
+                  let host = "";
+                  try { host = new URL(bridge.url).hostname.replace(/^\[|\]$/g, ""); } catch {}
+                  if (host) {
+                    const dns = await verifyResolvedIp(host);
+                    if (!dns.ok) codexErr = dns.reason;
+                  }
+                }
+              }
             }
           }
           if (codexErr) {

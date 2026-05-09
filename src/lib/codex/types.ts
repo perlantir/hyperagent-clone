@@ -224,17 +224,33 @@ export interface ApprovalRespondParams {
 
 // ─── DB row for the bridge connection ────────────────────────────────
 //
-// In hosted mode (Vercel), users run codex app-server locally and expose
-// it on a loopback WebSocket with a capability token. We store the URL
-// + token (encrypted) so our serverless routes can connect on demand.
+// Phase 1 manual bridge has TWO sub-variants we need to track explicitly,
+// because they have different reachability + safety properties:
+//
+//   "browser"      The user's browser tab is the client. Bridge runs
+//                  on the same machine as the browser. URL is
+//                  loopback / RFC1918 / *.local. Hosted Vercel server
+//                  CANNOT reach this URL — only the browser can. We
+//                  refuse server-side fetches when this is set.
+//
+//   "tunnel"       The bridge sits behind a public tunnel (ngrok,
+//                  Cloudflare Tunnel, a self-hosted reverse proxy).
+//                  URL is wss:// against a public DNS / IP. Hosted
+//                  server can reach it AFTER passing the SSRF
+//                  validator + connection-time DNS guard.
+//
+//   "local-server" Our Node runtime IS the user's machine (npm run
+//                  dev / desktop wrapper). Server-side fetches to
+//                  loopback are legitimate because it's the same host.
+//                  Refused on Vercel.
+//
+// We default to "browser" for any new config that doesn't specify; old
+// rows from P57 are inferred via inferConnectionLocationFromUrl().
+export type CodexBridgeLocation = "browser" | "tunnel" | "local-server";
 
 export interface CodexBridgeConfig {
-  // ws://127.0.0.1:8345 or wss://relay.example.com (with TLS).
   url: string;
-  // Capability/bearer token the bridge expects via Authorization header.
   capabilityToken: string;
-  // Set when the user has explicitly enabled the experimental
-  // chatgptAuthTokens flow inside their bridge. We do NOT persist tokens
-  // here — only the flag, so the UI can warn the user.
   experimentalApi?: boolean;
+  connectionLocation?: CodexBridgeLocation;
 }

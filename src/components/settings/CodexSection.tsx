@@ -42,9 +42,13 @@ type ProviderMode =
 interface BridgeStatus {
   configured: boolean;
   host?: string;
+  url?: string;
   tokenTail?: string;
   experimentalApi?: boolean;
+  connectionLocation?: "browser" | "tunnel" | "local-server";
 }
+
+type BridgeLocation = "browser" | "tunnel" | "local-server";
 
 interface LocalStatus {
   supportsSpawn: boolean;
@@ -85,7 +89,11 @@ export function CodexSection() {
   const [bridgeUrl, setBridgeUrl] = useState("");
   const [bridgeToken, setBridgeToken] = useState("");
   const [experimentalApi, setExperimentalApi] = useState(false);
-  const [allowNonLoopback, setAllowNonLoopback] = useState(false);
+  // P64.1 — connection location is now the primary axis. "browser" =
+  // browser tab connects to the user's localhost bridge; "tunnel" =
+  // public URL routable from the hosted server; "local-server" = our
+  // Node IS the user's machine.
+  const [bridgeLocation, setBridgeLocation] = useState<BridgeLocation>("browser");
   const [showBridgeForm, setShowBridgeForm] = useState(false);
 
   async function reload() {
@@ -150,13 +158,19 @@ export function CodexSection() {
     setBusy("bridge");
     const r = await fetch("/api/codex/connection", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url: bridgeUrl, capabilityToken: bridgeToken, experimentalApi, allowNonLoopback }),
+      body: JSON.stringify({
+        url: bridgeUrl,
+        capabilityToken: bridgeToken,
+        experimentalApi,
+        connectionLocation: bridgeLocation,
+      }),
     });
     const j = await r.json();
     setBusy(null);
     if (r.ok) {
       toast.success("Bridge saved", "Connection details encrypted at rest.");
-      setBridgeUrl(""); setBridgeToken(""); setExperimentalApi(false); setAllowNonLoopback(false);
+      setBridgeUrl(""); setBridgeToken(""); setExperimentalApi(false);
+      setBridgeLocation("browser");
       setShowBridgeForm(false);
       reload();
     } else {
@@ -167,14 +181,66 @@ export function CodexSection() {
   async function testBridge() {
     setBusy("test");
     try {
+      // For browser-direct bridges, the server can't reach the URL —
+      // run the test in the browser instead by opening a WS straight
+      // to the saved URL.
+      if (bridge?.connectionLocation === "browser" && bridge?.url) {
+        await testBridgeFromBrowser(bridge.url);
+        return;
+      }
       const r = await fetch("/api/codex/test-connection", { method: "POST" });
       const j = await r.json();
       if (j.ok) {
         toast.success("Bridge reachable", `Connected in ${j.elapsedMs}ms · ${j.account?.authMode || "unauthenticated"}`);
+      } else if (j.requiresBrowserTest) {
+        toast.info("Browser-direct", j.error || "Run the test from your browser.");
       } else {
         toast.error("Bridge unreachable", j.error || "");
       }
     } finally { setBusy(null); }
+  }
+
+  // P64.1 — browser-direct bridge connectivity test. Opens a WS from
+  // the user's tab to their localhost bridge. Doesn't authenticate via
+  // capability token (which would require pasting it back here in a
+  // way the server already has) — it just confirms the bridge is
+  // listening and accepting WebSocket upgrades.
+  async function testBridgeFromBrowser(url: string) {
+    return new Promise<void>(resolve => {
+      const t0 = Date.now();
+      let resolved = false;
+      const timeout = setTimeout(() => {
+        if (resolved) return;
+        resolved = true;
+        toast.error("Bridge unreachable from your browser", `Timed out connecting to ${url} after 5 s. Make sure codex app-server is running locally.`);
+        resolve();
+      }, 5000);
+      try {
+        const ws = new WebSocket(url);
+        ws.onopen = () => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timeout);
+          const elapsed = Date.now() - t0;
+          ws.close();
+          toast.success("Bridge reachable from browser", `Connected in ${elapsed} ms. (Auth + account/read happen at chat time.)`);
+          resolve();
+        };
+        ws.onerror = () => {
+          if (resolved) return;
+          resolved = true;
+          clearTimeout(timeout);
+          toast.error("Bridge unreachable from your browser", `Couldn't open WebSocket to ${url}. Verify codex app-server is listening on that host:port.`);
+          resolve();
+        };
+      } catch (e: any) {
+        if (resolved) return;
+        resolved = true;
+        clearTimeout(timeout);
+        toast.error("Bridge test failed", e?.message || String(e));
+        resolve();
+      }
+    });
   }
 
   async function clearBridge() {
@@ -358,15 +424,39 @@ export function CodexSection() {
       {mode === "codexChatGPTBridge" && (
         <>
           <div style={{
-            padding: 12, borderRadius: 8, marginBottom: 18,
+            padding: 12, borderRadius: 8, marginBottom: 14,
             background: "rgba(245,158,11,0.08)",
             border: "1px solid rgba(245,158,11,0.30)",
-            fontSize: 11.5, color: "#92400e", lineHeight: 1.5,
+            fontSize: 11.5, color: "#92400e", lineHeight: 1.55,
           }}>
             <strong>Why is there a paste step?</strong> Because this app is hosted in the cloud, it
-            cannot automatically start a process on your laptop. Use this manual bridge only if you
-            know what you&apos;re doing. Codex Local (running locally) and Codex Companion don&apos;t
-            require any paste.
+            cannot automatically start a process on your laptop. The paste is a hosted-web architecture
+            limitation, NOT an OpenAI requirement. Codex Local (running locally) and Codex Companion
+            (recommended) don&apos;t require any paste.
+          </div>
+
+          <div style={{
+            padding: 12, borderRadius: 8, marginBottom: 18,
+            background: "var(--bg-subtle)",
+            fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.6,
+          }}>
+            <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 6 }}>
+              Manual bridge has two variants
+            </div>
+            <div style={{ marginBottom: 6 }}>
+              <strong>1. Browser-direct.</strong> Bridge runs at <code className="mono" style={MONO_INLINE}>ws://localhost:&lt;port&gt;</code> on
+              your machine. Your browser tab opens the connection. The hosted server cannot — its
+              loopback is its own runtime, not yours. Subject to browser HTTPS-to-localhost rules
+              (use <code className="mono" style={MONO_INLINE}>http://</code> for the app or set up
+              browser flags for mixed content).
+            </div>
+            <div>
+              <strong>2. Public tunnel.</strong> You expose the local bridge through ngrok / Cloudflare
+              Tunnel / SSH reverse-tunnel. URL is <code className="mono" style={MONO_INLINE}>wss://</code>
+              against a public DNS name. Hosted server connects directly. <strong>Required:</strong> a
+              capability token of at least 32 characters, since the URL is publicly addressable.
+              We block private/loopback URLs in this mode (SSRF protection).
+            </div>
           </div>
 
           <div style={{ marginBottom: 24 }}>
@@ -404,25 +494,42 @@ export function CodexSection() {
 
             {(showBridgeForm || !bridge?.configured) && (
               <div className="card" style={{ padding: 14, marginTop: 8 }}>
+                <label style={LABEL}>Connection variant</label>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6, marginBottom: 14 }}>
+                  <LocationRadio
+                    id="browser" label="Browser-direct"
+                    desc="Browser tab opens a WebSocket to your laptop's localhost bridge. URL must be ws://localhost or a private/loopback host."
+                    checked={bridgeLocation === "browser"} onChange={() => setBridgeLocation("browser")}
+                  />
+                  <LocationRadio
+                    id="tunnel" label="Public tunnel"
+                    desc="Bridge exposed via ngrok / Cloudflare Tunnel / etc. URL must be wss:// to a public host. Token must be at least 32 chars."
+                    checked={bridgeLocation === "tunnel"} onChange={() => setBridgeLocation("tunnel")}
+                  />
+                  <LocationRadio
+                    id="local-server" label="Local server (advanced)"
+                    desc="Hyperagent's Node runtime IS your machine (e.g. desktop wrapper, npm run dev on your laptop). Loopback URLs are legitimately our loopback. Refused on hosted Vercel."
+                    checked={bridgeLocation === "local-server"} onChange={() => setBridgeLocation("local-server")}
+                  />
+                </div>
+
                 <label style={LABEL}>Bridge URL</label>
                 <input className="input" value={bridgeUrl} onChange={e => setBridgeUrl(e.target.value)}
-                  placeholder="ws://127.0.0.1:8345" style={{ marginTop: 4 }} />
-                <label style={{ ...LABEL, marginTop: 12 }}>Capability token</label>
+                  placeholder={bridgeLocation === "tunnel" ? "wss://your-tunnel.ngrok.io" : "ws://127.0.0.1:8345"}
+                  style={{ marginTop: 4 }} />
+
+                <label style={{ ...LABEL, marginTop: 12 }}>
+                  Capability token {bridgeLocation === "tunnel" && <span style={{ color: "#dc2626" }}>(min 32 chars)</span>}
+                </label>
                 <input className="input" type="password" value={bridgeToken} onChange={e => setBridgeToken(e.target.value)}
                   placeholder="The --auth-token you passed to codex app-server" style={{ marginTop: 4 }} />
+
                 <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12, fontSize: 12 }}>
                   <input type="checkbox" checked={experimentalApi}
                     onChange={e => setExperimentalApi(e.target.checked)} />
-                  Enable <code className="mono" style={MONO_INLINE}>chatgptAuthTokens</code> flow (experimental — requires bridge with experimentalApi support)
+                  Enable <code className="mono" style={MONO_INLINE}>chatgptAuthTokens</code> flow (experimental)
                 </label>
-                <label style={{ display: "flex", alignItems: "flex-start", gap: 6, marginTop: 8, fontSize: 12, lineHeight: 1.5 }}>
-                  <input type="checkbox" checked={allowNonLoopback}
-                    onChange={e => setAllowNonLoopback(e.target.checked)} style={{ marginTop: 2 }} />
-                  <span>
-                    <strong>Allow non-loopback URL.</strong> By default we require localhost / 127.0.0.1 / private network ranges.
-                    Only enable this if the bridge runs on a remote host you fully control and the URL uses <code className="mono">wss://</code>.
-                  </span>
-                </label>
+
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 14 }}>
                   <button className="btn btn-primary" disabled={busy === "bridge" || !bridgeUrl || !bridgeToken}
                     onClick={saveBridge} style={{ fontSize: 12 }}>
@@ -532,6 +639,27 @@ function ModeRow({ label, desc, active, disabled, onPick, rightSlot, comingSoon 
   );
 }
 
+function LocationRadio({ id: _id, label, desc, checked, onChange }: {
+  id: string; label: string; desc: string; checked: boolean; onChange: () => void;
+}) {
+  return (
+    <label style={{
+      display: "flex", alignItems: "flex-start", gap: 8,
+      padding: "8px 10px",
+      border: checked ? "1px solid var(--accent)" : "1px solid var(--border)",
+      borderRadius: 8,
+      background: checked ? "var(--accent-bg)" : "var(--bg)",
+      cursor: "pointer",
+    }}>
+      <input type="radio" checked={checked} onChange={onChange} style={{ marginTop: 3 }} />
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{label}</div>
+        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2, lineHeight: 1.5 }}>{desc}</div>
+      </span>
+    </label>
+  );
+}
+
 function LocalStatusBadge({ available, reason, version }: { available: boolean; reason: string | null; version: string | null }) {
   if (available) {
     return (
@@ -555,7 +683,7 @@ function CodexLocalPane({ local, onRefresh }: { local: LocalStatus | null; onRef
   const ready = !!local?.supportsSpawn && !!local?.codexInstalled;
   return (
     <div className="card" style={{ padding: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>
             {ready ? "Local Codex ready" : "Local Codex not available"}
@@ -564,10 +692,10 @@ function CodexLocalPane({ local, onRefresh }: { local: LocalStatus | null; onRef
             {ready
               ? `Detected ${local?.version || "codex"}. Turns will spawn codex app-server over stdio — no paste, no companion needed.`
               : local?.reason === "vercel-hosted"
-                ? "This app is hosted in the cloud. Codex Local needs a long-lived host where Hyperagent can spawn child processes. Use Codex Companion (recommended) or run Hyperagent locally."
+                ? "This app is hosted in the cloud. Codex Local needs a long-lived host where Hyperagent can spawn child processes ON THE SAME MACHINE THE USER IS ON. Use Codex Companion (recommended) or run Hyperagent locally."
                 : !local?.codexInstalled
                   ? "Install the codex CLI from https://github.com/openai/codex, then click Refresh below."
-                  : "Local mode disabled by the operator."}
+                  : "Local mode disabled by the operator (HYPERAGENT_DISABLE_LOCAL_CODEX=1)."}
           </div>
         </div>
         <button onClick={onRefresh} className="btn"
@@ -575,6 +703,27 @@ function CodexLocalPane({ local, onRefresh }: { local: LocalStatus | null; onRef
           Refresh
         </button>
       </div>
+
+      <details style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.55 }}>
+        <summary style={{ cursor: "pointer", marginBottom: 6 }}>Where Local mode is and isn&apos;t available</summary>
+        <ul style={{ paddingLeft: 18, margin: "6px 0", display: "flex", flexDirection: "column", gap: 4 }}>
+          <li>
+            <strong>npm run dev on your laptop:</strong> works if codex is on PATH and your Node process can spawn child processes.
+          </li>
+          <li>
+            <strong>Desktop / native wrapper (Tauri / Electron / Hyperagent native):</strong> works — the wrapper runs on the same machine as the user.
+          </li>
+          <li>
+            <strong>Long-lived Node host (your own VPS):</strong> works <em>only if</em> the host IS the same machine where Codex should run and where the ChatGPT/Codex auth state is stored. Don&apos;t use this on a shared multi-tenant server — every user&apos;s codex would share one auth state.
+          </li>
+          <li>
+            <strong>Docker (locally on your laptop):</strong> works only if (a) the codex binary is inside the container or bind-mounted from the host, AND (b) the codex auth/state directory (typically <code className="mono">~/.codex</code>) is mounted into the container so login persists across container restarts.
+          </li>
+          <li>
+            <strong>Remote Docker / production server / Vercel:</strong> does NOT work. The Node runtime there cannot spawn a process on your laptop, and even if it could, the codex auth state would belong to the server, not you.
+          </li>
+        </ul>
+      </details>
     </div>
   );
 }

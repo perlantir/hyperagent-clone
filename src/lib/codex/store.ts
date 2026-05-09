@@ -23,7 +23,13 @@ import {
   CODEX_PROVIDER_MODES,
   normalizeProviderMode,
   type CodexBridgeConfig,
+  type CodexBridgeLocation,
 } from "./types";
+import {
+  validateForServerSideFetch,
+  validateForBrowserOrLocal,
+  inferConnectionLocationFromUrl,
+} from "./url-safety";
 
 let _initialized = false;
 
@@ -45,6 +51,11 @@ export async function ensureCodexSchema() {
       "createdAt" BIGINT NOT NULL,
       "updatedAt" BIGINT NOT NULL
     );
+    -- P64.1 — declare WHERE the bridge is reachable from (browser /
+    -- tunnel / local-server). Determines whether the hosted server is
+    -- allowed to fetch the URL or whether the browser must drive the
+    -- connection itself.
+    ALTER TABLE codex_bridges ADD COLUMN IF NOT EXISTS "connectionLocation" TEXT NOT NULL DEFAULT 'browser';
   `);
   _initialized = true;
 }
@@ -77,7 +88,7 @@ export async function setProviderMode(userId: string, mode: CodexProviderMode): 
 export async function getBridgeConfig(userId: string): Promise<CodexBridgeConfig | null> {
   await ensureCodexSchema();
   const r = await pool().query(
-    `SELECT "encryptedUrl", "encryptedToken", "experimentalApi" FROM codex_bridges WHERE "userId"=$1`,
+    `SELECT "encryptedUrl", "encryptedToken", "experimentalApi", "connectionLocation" FROM codex_bridges WHERE "userId"=$1`,
     [userId],
   );
   const row = r.rows[0];
@@ -86,55 +97,84 @@ export async function getBridgeConfig(userId: string): Promise<CodexBridgeConfig
     const url = decryptValue(row.encryptedUrl);
     const tok = decryptValue(row.encryptedToken);
     if (!url || !tok) return null;
+    // Legacy rows (P57/P64) lack connectionLocation; infer from URL.
+    let loc = (row.connectionLocation as CodexBridgeLocation) || undefined;
+    if (!loc || (loc !== "browser" && loc !== "tunnel" && loc !== "local-server")) {
+      const inferred = inferConnectionLocationFromUrl(url);
+      // Conservative default: anything ambiguous becomes "browser" so
+      // the server never blindly fetches it.
+      loc = inferred === "tunnel" ? "tunnel" : "browser";
+    }
     return {
       url,
       capabilityToken: tok,
       experimentalApi: !!row.experimentalApi,
+      connectionLocation: loc,
     };
   } catch {
-    // If decryption fails (e.g. ENCRYPTION_KEY rotation without re-encrypt),
-    // surface as no-config rather than throwing through to the UI.
     return null;
   }
 }
 
 export async function setBridgeConfig(
   userId: string,
-  cfg: CodexBridgeConfig & { allowNonLoopback?: boolean },
+  cfg: CodexBridgeConfig,
 ): Promise<void> {
   await ensureCodexSchema();
-  let parsed: URL;
-  try { parsed = new URL(cfg.url); }
-  catch { throw new Error("Bridge URL is not a valid URL"); }
-  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-    throw new Error("Bridge URL must use ws:// or wss://");
+
+  // P64.1 — connection location is required and drives validation.
+  const loc: CodexBridgeLocation = cfg.connectionLocation || "browser";
+  if (loc !== "browser" && loc !== "tunnel" && loc !== "local-server") {
+    throw new Error(`Invalid connectionLocation: ${loc}`);
   }
-  // P64 — by default require the URL to point at loopback/private/local
-  // hosts. The bridge runs on the user's own machine; an internet-routable
-  // URL almost always indicates a misconfiguration that would expose the
-  // capability token to a third party. Users who genuinely need to point
-  // at a remote bridge can opt in via allowNonLoopback (advanced flag).
-  if (!cfg.allowNonLoopback && !isLoopbackOrPrivate(parsed.hostname)) {
-    throw new Error(
-      `Bridge URL must point at localhost, 127.0.0.1, ::1, or a private network host (10.*, 172.16-31.*, 192.168.*). ` +
-      `Got "${parsed.hostname}". If you really mean to connect to an internet-routable host, set the advanced flag explicitly.`,
-    );
+
+  // Validate the URL against the right ruleset for this location.
+  // - "browser"      → loopback/private OK; cloud metadata always blocked
+  // - "tunnel"       → must be reachable from the public internet AND
+  //                    pass the SSRF deny-list (no metadata, no leaking
+  //                    a private IP through DNS rebinding via a name
+  //                    that resolves to private space — but DNS check
+  //                    runs at connection time, not write time)
+  // - "local-server" → loopback/private allowed; the host is the same
+  //                    machine where our Node runs. Refused on Vercel
+  //                    at write time because there's no point.
+  if (loc === "browser") {
+    const r = validateForBrowserOrLocal(cfg.url);
+    if (!r.ok) throw new Error(r.reason);
+  } else if (loc === "tunnel") {
+    const r = validateForServerSideFetch(cfg.url);
+    if (!r.ok) throw new Error(r.reason);
+  } else {
+    // local-server
+    if (process.env.VERCEL || process.env.VERCEL_ENV) {
+      throw new Error("local-server connection mode is not available on hosted Vercel — pick browser or tunnel.");
+    }
+    const r = validateForBrowserOrLocal(cfg.url);
+    if (!r.ok) throw new Error(r.reason);
   }
+
   if (!cfg.capabilityToken || cfg.capabilityToken.length < 16) {
     throw new Error("Capability token must be at least 16 characters");
   }
+  // For tunnel mode the token is exposed over the public internet, so
+  // we additionally require a stronger minimum.
+  if (loc === "tunnel" && cfg.capabilityToken.length < 32) {
+    throw new Error("Tunnel mode requires a capability token of at least 32 characters.");
+  }
+
   const now = Date.now();
   const encUrl = encryptValue(cfg.url);
   const encToken = encryptValue(cfg.capabilityToken);
   await pool().query(`
-    INSERT INTO codex_bridges ("userId", "encryptedUrl", "encryptedToken", "experimentalApi", "createdAt", "updatedAt")
-    VALUES ($1, $2, $3, $4, $5, $5)
+    INSERT INTO codex_bridges ("userId", "encryptedUrl", "encryptedToken", "experimentalApi", "connectionLocation", "createdAt", "updatedAt")
+    VALUES ($1, $2, $3, $4, $5, $6, $6)
     ON CONFLICT ("userId") DO UPDATE
       SET "encryptedUrl"=EXCLUDED."encryptedUrl",
           "encryptedToken"=EXCLUDED."encryptedToken",
           "experimentalApi"=EXCLUDED."experimentalApi",
+          "connectionLocation"=EXCLUDED."connectionLocation",
           "updatedAt"=EXCLUDED."updatedAt"
-  `, [userId, encUrl, encToken, !!cfg.experimentalApi, now]);
+  `, [userId, encUrl, encToken, !!cfg.experimentalApi, loc, now]);
 }
 
 export async function deleteBridgeConfig(userId: string): Promise<void> {
@@ -142,10 +182,9 @@ export async function deleteBridgeConfig(userId: string): Promise<void> {
   await pool().query(`DELETE FROM codex_bridges WHERE "userId"=$1`, [userId]);
 }
 
-// P64 — strict check: only loopback or RFC1918 private hosts. Refuses
-// public IPs and DNS names that resolve to public space (we can't
-// resolve in a sync function so we just match string patterns; the
-// transport itself adds another DNS-time guard).
+// DEPRECATED in P64.1 — use classifyHost / validateForBrowserOrLocal /
+// validateForServerSideFetch from ./url-safety.ts instead. Kept as a
+// thin re-export for any third-party caller that imported it.
 export function isLoopbackOrPrivate(host: string): boolean {
   if (!host) return false;
   const h = host.toLowerCase();
