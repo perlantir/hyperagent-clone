@@ -29,6 +29,9 @@ export const SECRET_PROVIDERS = [
   "hyperbrowser",  // Cloud Chromium — browser/computer-use
   "composio",      // 500+ third-party connectors
   "e2b",           // Sandboxed code execution (Python, shell)
+  "exa",           // P39 — neural search via exa.ai
+  "googlemaps",    // P39 — Maps tool (geocoding, places, directions)
+  "heygen",        // P39 — Avatar (talking-head video)
 ] as const;
 export type SecretProvider = typeof SECRET_PROVIDERS[number];
 
@@ -41,6 +44,9 @@ const ENV_FALLBACKS: Record<SecretProvider, string> = {
   hyperbrowser: "HYPERBROWSER_API_KEY",
   composio: "COMPOSIO_API_KEY",
   e2b: "E2B_API_KEY",
+  exa: "EXA_API_KEY",
+  googlemaps: "GOOGLE_MAPS_API_KEY",
+  heygen: "HEYGEN_API_KEY",
 };
 
 // User-facing metadata for the settings UI.
@@ -74,6 +80,18 @@ export const PROVIDER_META: Record<SecretProvider, {
   e2b: {
     label: "e2b", description: "Cloud sandboxes for code execution — Python, shell, file I/O.",
     placeholder: "e2b_...", helpUrl: "https://e2b.dev/dashboard",
+  },
+  exa: {
+    label: "Exa", description: "Neural web search with semantic ranking + inline page contents.",
+    placeholder: "...", helpUrl: "https://dashboard.exa.ai/api-keys",
+  },
+  googlemaps: {
+    label: "Google Maps", description: "Geocoding, places, directions, distance matrix for the maps tool.",
+    placeholder: "AIza...", helpUrl: "https://console.cloud.google.com/google/maps-apis/credentials",
+  },
+  heygen: {
+    label: "HeyGen", description: "Talking-head avatar videos for the avatar tool.",
+    placeholder: "...", helpUrl: "https://app.heygen.com/settings/api",
   },
 };
 

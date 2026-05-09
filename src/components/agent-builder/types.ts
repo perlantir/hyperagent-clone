@@ -46,8 +46,10 @@ export type ToolCategory =
   | "Media" | "Memory" | "Workflow" | "Files";
 
 export const NATIVE_TOOL_CATALOG: NativeToolMeta[] = [
-  { name: "web_search",        label: "Search",            description: "Search the public web with retries + budget tracking.", category: "Research" },
-  { name: "search_knowledge",  label: "Thread search",     description: "Search across the user's memories and skill library from inside a turn.", category: "Research" },
+  { name: "web_search",        label: "Search",            description: "Search the public web with retries + budget tracking. DuckDuckGo backed.", category: "Research" },
+  { name: "exa_search",        label: "Exa",               description: "Neural search via Exa.ai — semantic ranking + optional inline page contents. Bring your own Exa key.", category: "Research" },
+  { name: "thread_search",     label: "Thread search",     description: "Search across the user's other threads. Returns thread title + matching message snippet.", category: "Research" },
+  { name: "search_knowledge",  label: "Knowledge search",  description: "Search the user's memories and skill library from inside a turn.", category: "Research" },
   { name: "code_interpreter",  label: "Full VM",           description: "Run Python in an isolated cloud sandbox with pandas, numpy, requests preinstalled.", category: "Computation" },
   { name: "run_shell",         label: "Run shell",         description: "Execute bash in an isolated Ubuntu sandbox with curl, jq, ffmpeg.", category: "Computation" },
   { name: "browser_navigate",  label: "Browser",           description: "Drive a real Chromium session — navigate, click, type, scroll.", category: "Browser" },
@@ -65,9 +67,14 @@ export const NATIVE_TOOL_CATALOG: NativeToolMeta[] = [
   { name: "computer_type",     label: "Computer type",     description: "Type text on the desktop.", category: "Computer" },
   { name: "computer_key",      label: "Computer key",      description: "Press a keyboard key on the desktop.", category: "Computer" },
   { name: "generate_artifact", label: "Webpages & docs",   description: "Create a persistent artifact (webpage, document, table, image) attached to the thread.", category: "Media" },
+  { name: "generate_slides",   label: "Slides",            description: "Generate a reveal.js slide deck as a webpage artifact with arrow navigation + fullscreen.", category: "Media" },
+  { name: "generate_table",    label: "Tables",            description: "Create a structured table artifact from columns + rows — sortable HTML output.", category: "Media" },
   { name: "generate_image",    label: "Images",            description: "Generate images via Gemini Nano Banana / OpenAI / Grok.", category: "Media" },
   { name: "generate_video",    label: "Video",             description: "Generate short videos via Gemini Veo / OpenAI Sora.", category: "Media" },
   { name: "generate_speech",   label: "Audio",             description: "Generate speech via Gemini TTS / OpenAI TTS.", category: "Media" },
+  { name: "transcribe_audio",  label: "Transcribe",        description: "Transcribe audio to text via Whisper (Gemini multimodal as fallback).", category: "Media" },
+  { name: "avatar_video",      label: "Avatar",            description: "Generate a talking-head avatar video via HeyGen — spokesperson clips, narration, briefings.", category: "Media" },
+  { name: "maps",              label: "Maps",              description: "Geocoding, places, directions, distance matrix via Google Maps. Bring your own key.", category: "Research" },
   { name: "save_memory",       label: "Save memory",       description: "Persist a fact/preference for future turns.", category: "Memory" },
   { name: "update_working_memory", label: "Working memory", description: "Update the per-thread working doc (Plan Tasks, Findings, Decisions, Notes).", category: "Memory" },
   { name: "dispatch_agent",    label: "Dispatch subagent", description: "Hand off a focused subtask to a subagent with budget reservation.", category: "Workflow" },

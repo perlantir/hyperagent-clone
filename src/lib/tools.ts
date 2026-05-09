@@ -6,6 +6,8 @@
 import * as browser from "./browser";
 import * as media from "./media";
 import { getComposioTools, executeComposioTool, listConnectedAccounts } from "./composio";
+import { resolveSecret } from "./secrets";
+import { pool } from "./db";
 
 export interface ToolDef {
   name: string;
@@ -907,7 +909,367 @@ Pitfalls: Sandbox timeout 60s. No filesystem state persists between calls. Outpu
       } catch (e: any) { return `run_shell error: ${e.message}`; }
     },
   },
+
+  // ============ P39 — EXTENDED NATIVE TOOL CATALOG ============
+
+  exa_search: {
+    name: "exa_search",
+    description: `Neural search via Exa.ai. Higher-signal results than the built-in DuckDuckGo path; optional inline page contents.
+
+When to use: research that benefits from semantic ranking (e.g. finding the canonical post on a topic), or when you want page contents inline without a follow-up browser call.
+
+When NOT to use: simple factual lookups (web_search is cheaper) or pages you already know the URL of (use browser_navigate).
+
+Requires an Exa API key in Settings → API Keys (provider: exa). Falls back to web_search if no key is configured.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Natural-language query. Exa accepts long phrases as well as keywords." },
+        numResults: { type: "number", description: "Default 5, max 10." },
+        text: { type: "boolean", description: "Include page text content inline (longer response, no need for follow-up browser calls)" },
+      },
+      required: ["query"],
+    },
+    async execute(args, ctx) {
+      const apiKey = await resolveSecret(ctx.userId, "exa");
+      if (!apiKey) {
+        return BUILTIN_TOOLS.web_search.execute({ query: args.query }, ctx);
+      }
+      try {
+        const r = await fetch("https://api.exa.ai/search", {
+          method: "POST",
+          headers: { "x-api-key": apiKey, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query: String(args.query || ""),
+            numResults: Math.min(10, Math.max(1, Number(args.numResults) || 5)),
+            type: "neural",
+            contents: args.text ? { text: { maxCharacters: 4000 } } : undefined,
+          }),
+        });
+        if (!r.ok) return `exa_search ${r.status}: ${(await r.text()).slice(0, 400)}`;
+        const j = await r.json();
+        const results = (j.results || []).slice(0, 10).map((r: any, i: number) => {
+          const lines = [`${i + 1}. ${r.title || "(no title)"}`, `   ${r.url}`];
+          if (r.publishedDate) lines.push(`   ${r.publishedDate}`);
+          if (r.text) lines.push(`   ${String(r.text).slice(0, 600)}…`);
+          return lines.join("\n");
+        });
+        return results.length ? results.join("\n\n") : "No results.";
+      } catch (e: any) {
+        return `exa_search error: ${e.message}`;
+      }
+    },
+  },
+
+  thread_search: {
+    name: "thread_search",
+    description: `Search across the user's other threads. Returns the matching thread title, the message snippet, and a link.
+
+When to use: "do I have a thread about X?", looking up prior decisions, finding which thread you discussed a topic in.
+
+When NOT to use: searching the public web (use web_search), searching the user's documents (use search_knowledge once knowledge ships).
+
+Pitfalls: This is an exact substring match for v1; embedding-based semantic search lands later. Use specific phrases.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "Substring to match in message content. Case-insensitive." },
+        limit: { type: "number", description: "Max results (default 8, max 20)." },
+      },
+      required: ["query"],
+    },
+    async execute(args, ctx) {
+      const q = String(args.query || "").trim();
+      if (!q) return "thread_search: empty query";
+      const limit = Math.min(20, Math.max(1, Number(args.limit) || 8));
+      const r = await pool().query(
+        `SELECT t.id AS "threadId", t.title, m.content, m."createdAt"
+         FROM messages m
+         JOIN threads t ON t.id = m."threadId"
+         WHERE t."userId" = $1
+           AND t.id <> $2
+           AND m.content ILIKE $3
+         ORDER BY m."createdAt" DESC
+         LIMIT $4`,
+        [ctx.userId, ctx.threadId, `%${q}%`, limit],
+      );
+      if (!r.rows.length) return `No threads matching "${q}".`;
+      return r.rows.map((row: any, i: number) => {
+        const idx = (row.content || "").toLowerCase().indexOf(q.toLowerCase());
+        const start = Math.max(0, idx - 60);
+        const end = Math.min(row.content.length, idx + q.length + 60);
+        const snippet = row.content.slice(start, end).replace(/\s+/g, " ");
+        const date = new Date(Number(row.createdAt)).toLocaleDateString();
+        return `${i + 1}. [${row.title}] ${date}\n   /threads/${row.threadId}\n   …${snippet}…`;
+      }).join("\n\n");
+    },
+  },
+
+  generate_slides: {
+    name: "generate_slides",
+    description: `Generate a slide deck and attach it as a webpage artifact. Renders via reveal.js with arrow-key navigation, fullscreen support, and slide counter.
+
+When to use: pitch decks, structured presentations, anything that benefits from one-idea-per-slide pacing.
+
+Provide an array of slides. Each slide can be markdown-ish HTML. Use level-2 headings for slide titles. Body should be short — a slide isn't a document.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Deck title shown on the cover slide." },
+        slides: {
+          type: "array",
+          description: "Array of slides. Each slide is a string of HTML (e.g. '<h2>Title</h2><p>Body</p>') or a structured object.",
+          items: { type: "string" },
+        },
+      },
+      required: ["title", "slides"],
+    },
+    async execute(args, ctx) {
+      const title = String(args.title || "Slides");
+      const slides: string[] = Array.isArray(args.slides) ? args.slides.map(String) : [];
+      if (slides.length === 0) return "generate_slides: no slides provided";
+      const html = renderRevealHtml(title, slides);
+      const { createArtifact } = await import("./db");
+      const a = await createArtifact({
+        threadId: ctx.threadId, messageId: ctx.messageId,
+        type: "webpage", title, body: html,
+      });
+      ctx.artifactsCreated.push({ id: a.id, type: "webpage", title });
+      return `Slides created: ${title} (${slides.length} slides). Artifact ${a.id}.`;
+    },
+  },
+
+  generate_table: {
+    name: "generate_table",
+    description: `Create a structured-data artifact (CSV-shaped) from rows of objects. Renders as an HTML table with sortable columns.
+
+When to use: comparison tables, structured outputs from research, dataset previews.
+
+Pitfalls: All rows should have the same keys. Strings only — embed numbers/dates as strings if you want guaranteed display formatting.`,
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Table title." },
+        columns: { type: "array", items: { type: "string" }, description: "Ordered column names." },
+        rows: {
+          type: "array",
+          description: "Array of objects, each keyed by the column names.",
+          items: { type: "object" },
+        },
+      },
+      required: ["title", "columns", "rows"],
+    },
+    async execute(args, ctx) {
+      const title = String(args.title || "Table");
+      const columns: string[] = Array.isArray(args.columns) ? args.columns.map(String) : [];
+      const rows: any[] = Array.isArray(args.rows) ? args.rows : [];
+      if (columns.length === 0 || rows.length === 0) return "generate_table: columns + rows required";
+      const escape = (s: any) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c] as string));
+      const html = `<table style="width:100%;border-collapse:collapse;font-size:14px"><thead><tr>${
+        columns.map(c => `<th style="text-align:left;padding:8px 10px;border-bottom:1px solid #e7e5e4;font-weight:600">${escape(c)}</th>`).join("")
+      }</tr></thead><tbody>${
+        rows.map(row => `<tr>${columns.map(c => `<td style="padding:8px 10px;border-bottom:1px solid #f5f5f4">${escape(row[c])}</td>`).join("")}</tr>`).join("")
+      }</tbody></table>`;
+      const { createArtifact } = await import("./db");
+      const a = await createArtifact({
+        threadId: ctx.threadId, messageId: ctx.messageId,
+        type: "table", title, body: html,
+      });
+      ctx.artifactsCreated.push({ id: a.id, type: "table", title });
+      return `Table created: ${title} (${rows.length} rows × ${columns.length} cols). Artifact ${a.id}.`;
+    },
+  },
+
+  maps: {
+    name: "maps",
+    description: `Geocoding, place search, directions, and distance matrix via Google Maps. One tool, four operations.
+
+Operations:
+- "geocode": address → lat/lng/formattedAddress
+- "places": text search for places (restaurants, hotels, etc.) near a location
+- "directions": route between two addresses with mode (driving/walking/transit/bicycling)
+- "distance": matrix of distances/durations between origins and destinations
+
+Requires a Google Maps API key in Settings → API Keys (provider: googlemaps).`,
+    input_schema: {
+      type: "object",
+      properties: {
+        operation: { type: "string", enum: ["geocode", "places", "directions", "distance"] },
+        address: { type: "string", description: "For geocode: address to look up." },
+        query: { type: "string", description: "For places: text query e.g. 'sushi'." },
+        location: { type: "string", description: "For places: anchor address or 'lat,lng'." },
+        origin: { type: "string", description: "For directions/distance." },
+        destination: { type: "string", description: "For directions." },
+        destinations: { type: "array", items: { type: "string" }, description: "For distance matrix." },
+        mode: { type: "string", enum: ["driving", "walking", "bicycling", "transit"] },
+      },
+      required: ["operation"],
+    },
+    async execute(args, ctx) {
+      const k = await resolveSecret(ctx.userId, "googlemaps");
+      if (!k) return "maps: configure a Google Maps API key in Settings → API Keys.";
+      const op = String(args.operation || "");
+      try {
+        if (op === "geocode") {
+          const r = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(args.address || "")}&key=${k}`);
+          const j = await r.json();
+          if (j.status !== "OK") return `geocode ${j.status}: ${j.error_message || "no results"}`;
+          const top = j.results[0];
+          return `Address: ${top.formatted_address}\nLat/lng: ${top.geometry.location.lat}, ${top.geometry.location.lng}\nPlace ID: ${top.place_id}`;
+        }
+        if (op === "places") {
+          const r = await fetch(`https://maps.googleapis.com/maps/api/place/textsearch/json?query=${encodeURIComponent(args.query || "")}${args.location ? `&location=${encodeURIComponent(args.location)}` : ""}&key=${k}`);
+          const j = await r.json();
+          if (j.status !== "OK") return `places ${j.status}: ${j.error_message || "no results"}`;
+          return j.results.slice(0, 8).map((p: any, i: number) =>
+            `${i + 1}. ${p.name}${p.rating ? ` ⭐${p.rating}` : ""}\n   ${p.formatted_address}\n   ${p.types?.slice(0, 3).join(", ") || ""}`
+          ).join("\n\n");
+        }
+        if (op === "directions") {
+          const mode = String(args.mode || "driving");
+          const r = await fetch(`https://maps.googleapis.com/maps/api/directions/json?origin=${encodeURIComponent(args.origin || "")}&destination=${encodeURIComponent(args.destination || "")}&mode=${mode}&key=${k}`);
+          const j = await r.json();
+          if (j.status !== "OK") return `directions ${j.status}: ${j.error_message || "no route"}`;
+          const route = j.routes[0];
+          const leg = route.legs[0];
+          return `From: ${leg.start_address}\nTo: ${leg.end_address}\nDistance: ${leg.distance.text}\nDuration: ${leg.duration.text}\nSteps: ${leg.steps.length}`;
+        }
+        if (op === "distance") {
+          const dests = (args.destinations || []).map((d: string) => encodeURIComponent(d)).join("|");
+          const mode = String(args.mode || "driving");
+          const r = await fetch(`https://maps.googleapis.com/maps/api/distancematrix/json?origins=${encodeURIComponent(args.origin || "")}&destinations=${dests}&mode=${mode}&key=${k}`);
+          const j = await r.json();
+          if (j.status !== "OK") return `distance ${j.status}: ${j.error_message || "no matrix"}`;
+          const row = j.rows[0];
+          return j.destination_addresses.map((d: string, i: number) => {
+            const e = row.elements[i];
+            return `${d}: ${e.status === "OK" ? `${e.distance.text} (${e.duration.text})` : e.status}`;
+          }).join("\n");
+        }
+        return `maps: unknown operation "${op}"`;
+      } catch (e: any) {
+        return `maps error: ${e.message}`;
+      }
+    },
+  },
+
+  avatar_video: {
+    name: "avatar_video",
+    description: `Generate a talking-head avatar video via HeyGen. Stores the resulting MP4 url as an artifact.
+
+Use for spokesperson clips, narration, briefings. Voice + avatar are configurable. Generation takes 1-5 minutes — the tool returns immediately with a job id; the artifact is updated when the render finishes.
+
+Requires a HeyGen API key in Settings → API Keys (provider: heygen).`,
+    input_schema: {
+      type: "object",
+      properties: {
+        script: { type: "string", description: "What the avatar says. Plain text." },
+        avatarId: { type: "string", description: "HeyGen avatar id. Default uses a generic stock avatar." },
+        voiceId: { type: "string", description: "HeyGen voice id. Default matches the avatar." },
+        title: { type: "string", description: "Title for the resulting artifact." },
+      },
+      required: ["script"],
+    },
+    async execute(args, ctx) {
+      const k = await resolveSecret(ctx.userId, "heygen");
+      if (!k) return "avatar_video: configure a HeyGen API key in Settings → API Keys.";
+      try {
+        const r = await fetch("https://api.heygen.com/v2/video/generate", {
+          method: "POST",
+          headers: { "X-Api-Key": k, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            video_inputs: [{
+              character: { type: "avatar", avatar_id: args.avatarId || "Daisy-inskirt-20220818", avatar_style: "normal" },
+              voice: { type: "text", input_text: String(args.script || ""), voice_id: args.voiceId || "1bd001e7e50f421d891986aad5158bc8" },
+            }],
+            dimension: { width: 1280, height: 720 },
+            aspect_ratio: "16:9",
+          }),
+        });
+        const j = await r.json();
+        if (!r.ok || !j.data?.video_id) return `avatar_video error: ${JSON.stringify(j).slice(0, 400)}`;
+        const videoId = j.data.video_id;
+        const title = String(args.title || "Avatar video");
+        const body = `<div style="padding:24px;text-align:center;font-family:Inter,system-ui,sans-serif">
+<h2>Avatar video rendering…</h2>
+<p style="color:#57534e">Job id: <code>${videoId}</code></p>
+<p style="color:#57534e">Re-open this artifact in 1-5 minutes to see the rendered MP4.</p>
+<p style="color:#a8a29e;font-size:12px">Powered by HeyGen.</p>
+</div>`;
+        const { createArtifact } = await import("./db");
+        const a = await createArtifact({
+          threadId: ctx.threadId, messageId: ctx.messageId,
+          type: "document", title, body,
+        });
+        ctx.artifactsCreated.push({ id: a.id, type: "document", title });
+        return `Avatar video job started: ${videoId}. Artifact ${a.id} will update when the render finishes (1-5 min).`;
+      } catch (e: any) {
+        return `avatar_video error: ${e.message}`;
+      }
+    },
+  },
+
+  transcribe_audio: {
+    name: "transcribe_audio",
+    description: `Transcribe an audio file to text via Whisper (or Gemini multimodal as fallback).
+
+Provide audio as a base64-encoded data URL string OR a thread artifact id (kind=image but containing audio). For longer audio, the agent should pre-chunk via run_shell + ffmpeg before calling.
+
+When to use: meeting recordings, voice memos, podcasts.
+
+Limitations: ~25 MB hard upload cap; longer files should be chunked. Returns plain text only — no diarization for now (lands when we wire HeyGen + speaker labels).`,
+    input_schema: {
+      type: "object",
+      properties: {
+        dataUrl: { type: "string", description: "data:audio/...;base64,XXX" },
+        artifactId: { type: "string", description: "Alternative to dataUrl — id of a previously-saved audio artifact" },
+        mimeType: { type: "string", description: "Optional override; defaults to audio/mpeg" },
+      },
+    },
+    async execute(args, ctx) {
+      let base64 = "";
+      let mimeType = String(args.mimeType || "audio/mpeg");
+      if (typeof args.dataUrl === "string" && args.dataUrl.startsWith("data:")) {
+        const m = args.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+        if (!m) return "transcribe_audio: invalid dataUrl";
+        mimeType = m[1];
+        base64 = m[2];
+      } else if (typeof args.artifactId === "string") {
+        const { getArtifact } = await import("./db");
+        const a = await getArtifact(args.artifactId);
+        if (!a) return `transcribe_audio: artifact ${args.artifactId} not found`;
+        const m = (a.body || "").match(/data:([^;]+);base64,([^"']+)/);
+        if (!m) return "transcribe_audio: artifact body has no audio data URL";
+        mimeType = m[1];
+        base64 = m[2];
+      } else {
+        return "transcribe_audio: dataUrl or artifactId required";
+      }
+      try {
+        const text = await media.transcribeAudio(base64, mimeType, ctx.userId);
+        return text || "(empty transcript)";
+      } catch (e: any) {
+        return `transcribe_audio error: ${e.message}`;
+      }
+    },
+  },
 };
+
+function renderRevealHtml(title: string, slides: string[]): string {
+  const slideHtml = slides.map(s => `<section>${s}</section>`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${title.replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c] as string))}</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/theme/white.css">
+<style>
+.reveal h1, .reveal h2 { font-family: 'Instrument Serif', Georgia, serif; font-weight: 400; letter-spacing: -0.02em; }
+.reveal { font-family: 'Inter', system-ui, sans-serif; }
+@media (prefers-color-scheme: dark) { body { background: #0c0a09; } }
+</style>
+</head><body><div class="reveal"><div class="slides">${slideHtml}</div></div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5/dist/reveal.js"></script>
+<script>Reveal.initialize({ hash: true, controls: true, progress: true, transition: 'slide' });</script>
+</body></html>`;
+}
 
 // Anthropic-format tool spec
 export interface AnthropicTool {
@@ -962,7 +1324,11 @@ export async function executeAnyTool(
 // Default tool list for newly-created agents
 export const DEFAULT_AGENT_TOOLS = [
   "web_search",
+  "exa_search",
+  "thread_search",
   "generate_artifact",
+  "generate_slides",
+  "generate_table",
   "browser_navigate",
   "browser_screenshot",
   "browser_click",
@@ -982,6 +1348,8 @@ export const DEFAULT_AGENT_TOOLS = [
   "generate_image",
   "generate_speech",
   "generate_video",
+  "transcribe_audio",
+  "maps",
   "code_interpreter",
   "run_shell",
   "update_working_memory",
