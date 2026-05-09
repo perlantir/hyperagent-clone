@@ -1,17 +1,37 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { SaveMemoryButton } from "@/components/SaveMemoryButton";
+import { useToast } from "@/components/Toast";
 
-interface Msg { id?: string; role: "user" | "assistant"; content: string; toolCalls?: any[]; artifactIds?: string[]; streaming?: boolean; costCredits?: number; runId?: string; }
+interface Attachment {
+  kind: "image" | "file";
+  name: string;
+  contentType: string;
+  size: number;
+  dataUrl?: string;
+  textPreview?: string;
+}
+
+interface Msg {
+  id?: string; role: "user" | "assistant"; content: string;
+  toolCalls?: any[]; artifactIds?: string[]; attachments?: Attachment[];
+  streaming?: boolean; costCredits?: number; runId?: string;
+}
 
 export function ChatView({ threadId, agentId }: { threadId: string; agentId: string | null }) {
+  const toast = useToast();
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [routerNote, setRouterNote] = useState<string | null>(null);
   const [agents, setAgents] = useState<any[]>([]);
   const [useRouter, setUseRouter] = useState(false);
+  // P31 — pending attachments staged on the composer.
+  const [pending, setPending] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const reload = useCallback(async () => {
     const r = await fetch(`/api/threads/${threadId}`); const j = await r.json();
@@ -24,32 +44,79 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
-  // P28b — pre-fill the input from a #seed=... URL hash. Used by replay/fork
-  // flows so the user lands on the new thread with the original message
-  // staged in the composer (editable before re-sending).
+  // P28b — pre-fill the input from a #seed=... URL hash.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const m = window.location.hash.match(/^#seed=(.+)$/);
     if (m) {
       try { setInput(decodeURIComponent(m[1])); } catch {}
-      // Clear the hash so reload doesn't re-seed.
       history.replaceState(null, "", window.location.pathname + window.location.search);
     }
   }, [threadId]);
 
+  // P31 — upload a file and stage it as a pending attachment. Routes to
+  // the upload endpoint with attachToMessage=1 so the server returns the
+  // attachment metadata without creating a separate message/artifact.
+  async function uploadAttachment(file: File) {
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("threadId", threadId);
+      fd.append("file", file);
+      fd.append("attachToMessage", "1");
+      const r = await fetch("/api/upload", { method: "POST", body: fd });
+      const j = await r.json();
+      if (!r.ok || !j.attachment) {
+        toast.error("Upload failed", j.error || j.hint || `Unsupported: ${file.type}`);
+        return;
+      }
+      setPending(p => [...p, j.attachment]);
+    } catch (e: any) {
+      toast.error("Upload failed", e.message);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragging(false);
+    const files = Array.from(e.dataTransfer.files || []);
+    for (const f of files) uploadAttachment(f);
+  }
+
+  function onPaste(e: React.ClipboardEvent) {
+    const items = Array.from(e.clipboardData?.items || []);
+    for (const it of items) {
+      if (it.kind === "file") {
+        const f = it.getAsFile();
+        if (f) uploadAttachment(f);
+      }
+    }
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || streaming) return;
+    if ((!text && pending.length === 0) || streaming) return;
     setInput("");
     setStreaming(true);
     setRouterNote(null);
+    const attachmentsForSend = pending;
+    setPending([]);
 
-    setMessages(m => [...m, { role: "user", content: text }, { role: "assistant", content: "", streaming: true }]);
+    setMessages(m => [
+      ...m,
+      { role: "user", content: text, attachments: attachmentsForSend },
+      { role: "assistant", content: "", streaming: true },
+    ]);
 
     try {
       const r = await fetch("/api/chat", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ threadId, content: text, useRouter: useRouter && !agentId }),
+        body: JSON.stringify({
+          threadId, content: text, useRouter: useRouter && !agentId,
+          attachments: attachmentsForSend.length > 0 ? attachmentsForSend : undefined,
+        }),
       });
       if (!r.ok || !r.body) throw new Error("Chat request failed");
       const reader = r.body.getReader();
@@ -118,7 +185,24 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
   }
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+    <div
+      style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}
+      onDragEnter={e => { e.preventDefault(); setDragging(true); }}
+      onDragOver={e => { e.preventDefault(); }}
+      onDragLeave={e => { if (e.currentTarget === e.target) setDragging(false); }}
+      onDrop={onDrop}>
+      {dragging && (
+        <div style={{
+          position: "absolute", inset: 12, zIndex: 50,
+          border: "2px dashed var(--accent)", borderRadius: 14,
+          background: "var(--accent-bg)",
+          display: "grid", placeItems: "center",
+          color: "var(--accent)", fontSize: 14, fontWeight: 500,
+          pointerEvents: "none",
+        }}>
+          Drop files here — images attach to your message; other types become artifacts.
+        </div>
+      )}
       <div ref={messagesRef} style={{ flex: 1, overflowY: "auto", padding: "32px 32px 8px" }}>
         <div style={{ maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24 }}>
           {messages.length === 0 && (
@@ -150,16 +234,43 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
       </div>
       <div style={{ padding: "0 32px 24px", maxWidth: 760, width: "100%", margin: "0 auto", flexShrink: 0 }}>
         <div style={{ border: "1px solid var(--border-strong)", borderRadius: 14, background: "var(--bg-elev)", padding: "14px 16px", boxShadow: "0 4px 24px rgba(28,25,23,0.04)" }}>
+          {/* P31 — staged attachment pills */}
+          {pending.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              {pending.map((a, i) => (
+                <AttachmentPill key={i} a={a} onRemove={() => setPending(p => p.filter((_, j) => j !== i))} />
+              ))}
+            </div>
+          )}
           <textarea
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            placeholder="Reply to Hyperagent…"
+            onPaste={onPaste}
+            placeholder={pending.length > 0 ? "Add a message about the attachment…" : "Reply to Hyperagent…"}
             disabled={streaming}
             rows={1}
             style={{ width: "100%", border: "none", outline: "none", background: "transparent", color: "var(--text)", resize: "none", fontSize: 14.5, fontFamily: "inherit", lineHeight: 1.55, minHeight: 22, maxHeight: 200 }}
           />
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+            <input ref={fileInputRef} type="file" multiple accept="image/*,.txt,.md,.csv,.json,.tsv,.log"
+              style={{ display: "none" }}
+              onChange={async e => {
+                const files = Array.from(e.target.files || []);
+                for (const f of files) await uploadAttachment(f);
+                if (fileInputRef.current) fileInputRef.current.value = "";
+              }} />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              title="Attach an image or text file"
+              style={{
+                width: 32, height: 32, borderRadius: 7, background: "transparent",
+                border: "1px solid var(--border)", color: "var(--text-muted)",
+                fontSize: 14, lineHeight: 1, opacity: uploading ? 0.4 : 1,
+              }}>
+              {uploading ? "…" : "+"}
+            </button>
             {!agentId && (
               <label style={{ fontSize: 11.5, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, padding: "5px 10px", border: "1px solid var(--border)", borderRadius: 7, cursor: "pointer" }}>
                 <input type="checkbox" checked={useRouter} onChange={e => setUseRouter(e.target.checked)} style={{ margin: 0 }} />
@@ -169,8 +280,8 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
             <span style={{ fontSize: 11.5, color: "var(--text-faint)", padding: "5px 10px", border: "1px solid var(--border)", borderRadius: 7 }}>
               {agentId ? agents.find((a: any) => a.id === agentId)?.name || "Agent" : "Default"}
             </span>
-            <button onClick={send} disabled={streaming || !input.trim()}
-              style={{ marginLeft: "auto", width: 32, height: 32, borderRadius: 8, border: "none", background: "var(--text)", color: "var(--bg)", fontSize: 14, opacity: streaming || !input.trim() ? 0.3 : 1 }}>
+            <button onClick={send} disabled={streaming || (!input.trim() && pending.length === 0)}
+              style={{ marginLeft: "auto", width: 32, height: 32, borderRadius: 8, border: "none", background: "var(--text)", color: "var(--bg)", fontSize: 14, opacity: streaming || (!input.trim() && pending.length === 0) ? 0.3 : 1 }}>
               ↑
             </button>
           </div>
@@ -180,9 +291,73 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
   );
 }
 
+function AttachmentPill({ a, onRemove }: { a: Attachment; onRemove: () => void }) {
+  const sizeKb = (a.size / 1024).toFixed(1);
+  if (a.kind === "image" && a.dataUrl) {
+    return (
+      <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+        <img src={a.dataUrl} alt={a.name} style={{
+          height: 56, maxWidth: 120, objectFit: "cover",
+          borderRadius: 8, border: "1px solid var(--border)",
+        }} />
+        <button onClick={onRemove} title="Remove" style={{
+          position: "absolute", top: -6, right: -6,
+          width: 18, height: 18, borderRadius: 99,
+          background: "var(--text)", color: "var(--bg)",
+          border: "1px solid var(--bg-elev)", fontSize: 11, lineHeight: 1,
+          padding: 0, display: "grid", placeItems: "center",
+        }}>×</button>
+      </div>
+    );
+  }
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 8,
+      padding: "6px 10px", border: "1px solid var(--border)",
+      borderRadius: 7, background: "var(--bg-subtle)", fontSize: 12,
+    }}>
+      <span style={{ color: "var(--text-faint)" }}>📎</span>
+      <span style={{ fontWeight: 500, maxWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{a.name}</span>
+      <span style={{ color: "var(--text-faint)", fontSize: 11 }}>{sizeKb} KB</span>
+      <button onClick={onRemove} title="Remove" style={{
+        background: "transparent", border: "none", color: "var(--text-faint)",
+        fontSize: 13, padding: 0, marginLeft: 2,
+      }}>×</button>
+    </div>
+  );
+}
+
 function MessageView({ m }: { m: Msg }) {
   if (m.role === "user") {
-    return <div style={{ alignSelf: "flex-end", background: "var(--bg-subtle)", padding: "11px 16px", borderRadius: "16px 16px 4px 16px", fontSize: 14.5, maxWidth: "75%", lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{m.content}</div>;
+    return (
+      <div style={{ alignSelf: "flex-end", maxWidth: "75%", display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
+        {m.attachments && m.attachments.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "flex-end" }}>
+            {m.attachments.map((a, i) => (
+              a.kind === "image" && a.dataUrl ? (
+                <img key={i} src={a.dataUrl} alt={a.name} style={{
+                  maxWidth: 280, maxHeight: 220, objectFit: "cover",
+                  borderRadius: 10, border: "1px solid var(--border)",
+                }} />
+              ) : (
+                <div key={i} style={{
+                  display: "flex", alignItems: "center", gap: 8,
+                  padding: "8px 12px", border: "1px solid var(--border)",
+                  borderRadius: 8, background: "var(--bg-elev)", fontSize: 12.5,
+                }}>
+                  <span style={{ color: "var(--text-faint)" }}>📎</span>
+                  <span style={{ fontWeight: 500 }}>{a.name}</span>
+                  <span style={{ color: "var(--text-faint)", fontSize: 11 }}>{(a.size / 1024).toFixed(1)} KB</span>
+                </div>
+              )
+            ))}
+          </div>
+        )}
+        {m.content && (
+          <div style={{ background: "var(--bg-subtle)", padding: "11px 16px", borderRadius: "16px 16px 4px 16px", fontSize: 14.5, lineHeight: 1.55, whiteSpace: "pre-wrap" }}>{m.content}</div>
+        )}
+      </div>
+    );
   }
   return (
     <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
@@ -244,7 +419,7 @@ function ArtifactRef({ artifactId }: { artifactId: string }) {
   };
   const fg: any = { webpage: "#c2410c", document: "#15803d", table: "#1d4ed8", image: "#6d28d9" };
   return (
-    <a href={`/api/artifacts/${art.id}?render=1`} target="_blank" rel="noreferrer" style={{ display: "block", margin: "12px 0", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", background: "var(--bg-elev)", textDecoration: "none", color: "inherit" }}>
+    <a href={`/library/${art.id}`} style={{ display: "block", margin: "12px 0", border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", background: "var(--bg-elev)", textDecoration: "none", color: "inherit" }}>
       <div style={{ height: 160, background: colors[art.type], color: fg[art.type], display: "grid", placeItems: "center", fontFamily: "Instrument Serif, serif", fontSize: 22, padding: 16, textAlign: "center" }}>{art.title}</div>
       <div style={{ padding: "12px 16px", display: "flex", alignItems: "center", gap: 12 }}>
         <div style={{ flex: 1 }}>

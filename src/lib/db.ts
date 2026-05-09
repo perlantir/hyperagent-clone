@@ -43,6 +43,23 @@ async function initSchema() {
     -- P30 — onboarding flag. Set after the user dismisses the welcome modal.
     -- NULL = not yet onboarded; non-null = the timestamp it was completed.
     ALTER TABLE users ADD COLUMN IF NOT EXISTS "onboardedAt" BIGINT;
+    -- P31 — multi-modal attachments JSON column on messages. Stores an array
+    -- of { kind, name, contentType, size, dataUrl?, artifactId?, textPreview? }.
+    ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments TEXT;
+    -- P31b — append-only artifact version history. The live artifacts row
+    -- is the latest state; this table records every prior body before edits.
+    CREATE TABLE IF NOT EXISTS artifact_versions (
+      id TEXT PRIMARY KEY,
+      "artifactId" TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      "createdAt" BIGINT NOT NULL,
+      "changeNote" TEXT,
+      UNIQUE("artifactId", version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_artifact_versions_artifact
+      ON artifact_versions("artifactId", version DESC);
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id), "expiresAt" BIGINT NOT NULL
     );
@@ -341,26 +358,29 @@ export async function listMessages(threadId: string): Promise<Message[]> {
     ...r,
     toolCalls: r.toolCalls ? JSON.parse(r.toolCalls) : undefined,
     artifactIds: r.artifactIds ? JSON.parse(r.artifactIds) : undefined,
+    attachments: r.attachments ? JSON.parse(r.attachments) : undefined,
   }));
 }
 export async function createMessage(m: Omit<Message,"id"|"createdAt">): Promise<Message> {
   const id = uid("m"); const createdAt = Date.now();
-  await q(`INSERT INTO messages (id,"threadId",role,content,"toolCalls","artifactIds",model,"costCredits","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+  await q(`INSERT INTO messages (id,"threadId",role,content,"toolCalls","artifactIds",attachments,model,"costCredits","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
     [id, m.threadId, m.role, m.content,
      m.toolCalls ? JSON.stringify(m.toolCalls) : null,
      m.artifactIds ? JSON.stringify(m.artifactIds) : null,
+     m.attachments ? JSON.stringify(m.attachments) : null,
      m.model || null, m.costCredits ?? null, createdAt]);
   return { ...m, id, createdAt };
 }
-export async function updateMessage(id: string, fields: Partial<Pick<Message,"content"|"toolCalls"|"artifactIds"|"costCredits">>) {
+export async function updateMessage(id: string, fields: Partial<Pick<Message,"content"|"toolCalls"|"artifactIds"|"attachments"|"costCredits">>) {
   const cur = await qOne<any>(`SELECT * FROM messages WHERE id=$1`, [id]);
   if (!cur) return;
   const content = fields.content !== undefined ? fields.content : cur.content;
   const toolCalls = fields.toolCalls !== undefined ? JSON.stringify(fields.toolCalls) : cur.toolCalls;
   const artifactIds = fields.artifactIds !== undefined ? JSON.stringify(fields.artifactIds) : cur.artifactIds;
+  const attachments = fields.attachments !== undefined ? JSON.stringify(fields.attachments) : cur.attachments;
   const costCredits = fields.costCredits !== undefined ? fields.costCredits : cur.costCredits;
-  await q(`UPDATE messages SET content=$1,"toolCalls"=$2,"artifactIds"=$3,"costCredits"=$4 WHERE id=$5`,
-    [content, toolCalls, artifactIds, costCredits, id]);
+  await q(`UPDATE messages SET content=$1,"toolCalls"=$2,"artifactIds"=$3,attachments=$4,"costCredits"=$5 WHERE id=$6`,
+    [content, toolCalls, artifactIds, attachments, costCredits, id]);
 }
 
 // ARTIFACTS
@@ -373,8 +393,78 @@ export async function createArtifact(a: Omit<Artifact,"id"|"createdAt">): Promis
 export async function getArtifact(id: string): Promise<Artifact | null> {
   return qOne(`SELECT * FROM artifacts WHERE id=$1`, [id]);
 }
-export async function listArtifactsForUser(userId: string): Promise<Artifact[]> {
-  return q(`SELECT a.* FROM artifacts a JOIN threads t ON t.id=a."threadId" WHERE t."userId"=$1 ORDER BY a."createdAt" DESC`, [userId]);
+export async function listArtifactsForUser(userId: string, opts: { agentId?: string | null; projectId?: string | null } = {}): Promise<(Artifact & { agentId?: string | null; agentName?: string | null; projectId?: string | null })[]> {
+  await ensureInit();
+  const conds: string[] = [`t."userId"=$1`];
+  const vals: any[] = [userId];
+  if (opts.agentId !== undefined) {
+    if (opts.agentId === null) conds.push(`t."agentId" IS NULL`);
+    else { vals.push(opts.agentId); conds.push(`t."agentId"=$${vals.length}`); }
+  }
+  if (opts.projectId !== undefined) {
+    if (opts.projectId === null) conds.push(`t."projectId" IS NULL`);
+    else { vals.push(opts.projectId); conds.push(`t."projectId"=$${vals.length}`); }
+  }
+  const rows = await pool().query(
+    `SELECT a.*, t."agentId", t."projectId", ag.name as "agentName"
+     FROM artifacts a
+     JOIN threads t ON t.id=a."threadId"
+     LEFT JOIN agents ag ON ag.id=t."agentId"
+     WHERE ${conds.join(" AND ")}
+     ORDER BY a."createdAt" DESC`,
+    vals,
+  );
+  return rows.rows;
+}
+
+// P31b — Snapshot the current artifact body to artifact_versions and write
+// the new body. Returns the new version number. Wrapped in a transaction so
+// the snapshot + update commit atomically.
+export async function updateArtifactBody(id: string, fields: { title?: string; body?: string; changeNote?: string | null }): Promise<{ ok: boolean; newVersion?: number }> {
+  await ensureInit();
+  const c = await pool().connect();
+  try {
+    await c.query("BEGIN");
+    const cur = await c.query(`SELECT * FROM artifacts WHERE id=$1 FOR UPDATE`, [id]);
+    const a = cur.rows[0];
+    if (!a) { await c.query("ROLLBACK"); return { ok: false }; }
+    // Snapshot the prior state.
+    const v = await c.query(
+      `SELECT COALESCE(MAX(version), 0) + 1 AS next FROM artifact_versions WHERE "artifactId"=$1`,
+      [id],
+    );
+    const nextVersion = Number(v.rows[0].next);
+    const versionId = "av_" + (await import("node:crypto")).randomBytes(8).toString("hex");
+    await c.query(
+      `INSERT INTO artifact_versions (id, "artifactId", version, title, body, "createdAt", "changeNote")
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [versionId, id, nextVersion, a.title, a.body, Date.now(), fields.changeNote || null],
+    );
+    // Apply the new body.
+    const newTitle = fields.title !== undefined ? fields.title : a.title;
+    const newBody = fields.body !== undefined ? fields.body : a.body;
+    await c.query(
+      `UPDATE artifacts SET title=$1, body=$2 WHERE id=$3`,
+      [newTitle, newBody, id],
+    );
+    await c.query("COMMIT");
+    return { ok: true, newVersion: nextVersion };
+  } catch (e) {
+    await c.query("ROLLBACK");
+    throw e;
+  } finally {
+    c.release();
+  }
+}
+
+export async function listArtifactVersions(artifactId: string): Promise<Array<{ id: string; version: number; title: string; body: string; createdAt: number; changeNote: string | null }>> {
+  await ensureInit();
+  const r = await pool().query(
+    `SELECT id, version, title, body, "createdAt", "changeNote"
+     FROM artifact_versions WHERE "artifactId"=$1 ORDER BY version DESC`,
+    [artifactId],
+  );
+  return r.rows;
 }
 
 // AGENTS

@@ -22,9 +22,29 @@ export interface Message {
   content: string;
   toolCalls?: ToolCall[];
   artifactIds?: string[];
+  attachments?: MessageAttachment[];
   model?: string;
   costCredits?: number;
   createdAt: number;
+}
+
+// P31 — Multi-modal attachments. Images are inlined as base64 data URLs
+// (small, simple, lambda-friendly). Larger files store a reference to an
+// artifact instead. We only attach to user messages today, but the schema
+// is symmetric so assistant messages with generated images work later.
+export type MessageAttachmentKind = "image" | "file";
+export interface MessageAttachment {
+  kind: MessageAttachmentKind;
+  name: string;
+  contentType: string;
+  size: number;
+  // For images small enough to inline — data URL embedded directly. The
+  // chat route translates this into an Anthropic image content block.
+  dataUrl?: string;
+  // For files surfaced as artifacts (PDF, CSV) — link to the artifact id.
+  artifactId?: string;
+  // Optional textual preview (first N chars of CSV / extracted PDF text).
+  textPreview?: string;
 }
 
 export interface ToolCall {
@@ -42,6 +62,19 @@ export interface Artifact {
   title: string;
   body: string;
   createdAt: number;
+}
+
+// P31b — Artifact version history. Each edit snapshots the prior body so
+// the live row always reflects the latest state and the history table
+// captures every superseded version. Append-only.
+export interface ArtifactVersion {
+  id: string;
+  artifactId: string;
+  version: number;
+  title: string;
+  body: string;
+  createdAt: number;
+  changeNote: string | null;
 }
 
 export interface Agent {

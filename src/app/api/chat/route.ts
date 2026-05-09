@@ -1,9 +1,16 @@
 // The big one — streaming chat with tool calling, memory, multi-agent routing,
 // and credit accounting.
 //
-// Body: { threadId: string, content: string, useRouter?: boolean }
+// Body: { threadId: string, content: string, useRouter?: boolean,
+//         attachments?: MessageAttachment[] }
 // Returns: text/event-stream with JSON events (delta, tool_use, tool_result,
 //   artifact, router, done, error).
+//
+// P31 — Multi-modal attachments. The composer attaches images / text files
+// before sending. We translate them into Anthropic content blocks (image
+// block for images, prefix-text for file previews) and persist the
+// attachments JSON column on the user message so re-renders + replays see
+// the same context.
 
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
@@ -34,19 +41,31 @@ export const runtime = "nodejs";
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const { threadId, content, useRouter } = await req.json().catch(() => ({}));
-  if (!threadId || !content) return NextResponse.json({ error: "threadId and content required" }, { status: 400 });
+  const { threadId, content, useRouter, attachments } = await req.json().catch(() => ({}));
+  // Allow content-empty when an image attachment is the message — common UX
+  // pattern: drop image, hit send. But still require ONE of content or attachment.
+  const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
+  if (!threadId || (!content && !hasAttachments)) {
+    return NextResponse.json({ error: "threadId and (content or attachments) required" }, { status: 400 });
+  }
 
   const thread = await getThread(threadId, user.id);
   if (!thread) return NextResponse.json({ error: "thread not found" }, { status: 404 });
 
   if (await balance(user.id) <= 0) return NextResponse.json({ error: "out of credits" }, { status: 402 });
 
-  // Save user message.
-  await createMessage({ threadId, role: "user", content });
+  // Save user message — including attachments JSON so replays see the same
+  // multi-modal context.
+  await createMessage({
+    threadId, role: "user",
+    content: content || "",
+    attachments: hasAttachments ? attachments : undefined,
+  });
   if ((await listMessages(threadId)).filter(m => m.role === "user").length === 1) {
-    // First user message → use it as title (truncated).
-    await updateThread(threadId, user.id, { title: content.slice(0, 60) });
+    // First user message → use it as title. Use the text if present, else
+    // the attachment name.
+    const title = content?.slice(0, 60) || (hasAttachments ? `📎 ${attachments[0].name}` : "New thread");
+    await updateThread(threadId, user.id, { title });
   }
 
   // Smart routing: if useRouter is true and thread has no agent, pick one.
@@ -102,11 +121,19 @@ export async function POST(req: Request) {
   const systemBlocks = compiled.systemBlocks;
 
   // Build the conversation history for Anthropic.
+  // P31 — translate per-message attachments into Anthropic content blocks:
+  //   image attachments → { type: "image", source: { type: "base64", ... } }
+  //   text-file attachments → an extra text block prefixed with the filename
+  //     and the captured preview, so the model can reason about its content
+  //     without us inventing a file-reading tool.
   const allMsgs = await listMessages(threadId);
   const anthropicMessages: any[] = [];
+  let totalImageAttachments = 0;
   for (const m of allMsgs) {
-    if (m.role === "user") anthropicMessages.push({ role: "user", content: m.content });
-    else if (m.role === "assistant" && m.content) {
+    if (m.role === "user") {
+      anthropicMessages.push({ role: "user", content: buildUserContentBlocks(m.content, m.attachments) });
+      for (const a of (m.attachments || [])) if (a.kind === "image") totalImageAttachments++;
+    } else if (m.role === "assistant" && m.content) {
       anthropicMessages.push({ role: "assistant", content: m.content });
     }
   }
@@ -163,6 +190,16 @@ export async function POST(req: Request) {
     pinnedCount: pinnedMemories.length,
     contextualCount: contextualMemories.length,
   });
+  // P31 — log multi-modal context. Image-input tokens flow through
+  // Anthropic's usage.input_tokens automatically, so no extra accounting
+  // is needed; this emit is purely for trace visibility.
+  if (totalImageAttachments > 0) {
+    emitter.emit("memory_read", {
+      count: totalImageAttachments,
+      kind: "image_attachments",
+      note: "image content blocks attached to user messages",
+    });
+  }
 
   const encoder = new TextEncoder();
 
@@ -457,4 +494,38 @@ export async function POST(req: Request) {
       "Connection": "keep-alive",
     },
   });
+}
+
+// P31 — Build Anthropic content blocks for a user message that may carry
+// image and/or text-file attachments. Anthropic accepts a string OR an
+// array of content blocks; we use the array form when attachments exist.
+//
+// Image translation: data URLs like `data:image/png;base64,...` are split
+// into { media_type, data } parts that Anthropic's vision model expects.
+// File previews become an extra text block so the model sees the file
+// name + first ~8 KB inline. We keep them as separate blocks so the
+// preview is visually distinct from the user's question.
+function buildUserContentBlocks(text: string, attachments?: any[]): any {
+  if (!attachments || attachments.length === 0) return text || "";
+  const blocks: any[] = [];
+  for (const a of attachments) {
+    if (a.kind === "image" && typeof a.dataUrl === "string") {
+      const m = a.dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (m) {
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: m[1], data: m[2] },
+        });
+      }
+    } else if (a.kind === "file" && typeof a.textPreview === "string") {
+      blocks.push({
+        type: "text",
+        text: `[Attached file: ${a.name} (${a.contentType}, ${a.size} bytes)]\n\n${a.textPreview}${a.textPreview.length >= 8000 ? "\n\n[…truncated, showing first 8 KB]" : ""}`,
+      });
+    }
+  }
+  if (text) blocks.push({ type: "text", text });
+  // Anthropic requires non-empty content. If somehow nothing translated,
+  // fall back to the raw text (or a placeholder) so the call doesn't 400.
+  return blocks.length > 0 ? blocks : (text || "(empty message)");
 }
