@@ -4,7 +4,7 @@
 
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { userSummary, perAgentCosts, perDayCosts, recentRuns } from "@/lib/costs";
+import { userSummary, perAgentCosts, perDayCosts, recentRuns, perModelCosts, perToolUsage } from "@/lib/costs";
 import { balance } from "@/lib/credits";
 
 export const runtime = "nodejs";
@@ -34,17 +34,25 @@ export async function GET(req: Request) {
       return NextResponse.json({ perDay: await perDayCosts(user.id, range, 30) });
     case "recent":
       return NextResponse.json({ recent: await recentRuns(user.id, 50) });
+    case "model":
+      return NextResponse.json({ perModel: await perModelCosts(user.id, range) });
+    case "tool":
+      return NextResponse.json({ perTool: await perToolUsage(user.id, range) });
     case "all": {
-      const [summary, currentBalance, perAgent, perDay, recent] = await Promise.all([
+      // P45 — bundle in per-model + per-tool so the dashboard can render
+      // them without a second round trip.
+      const [summary, currentBalance, perAgent, perDay, recent, perModel, perTool] = await Promise.all([
         userSummary(user.id, range),
         balance(user.id),
         perAgentCosts(user.id, range, 20),
         perDayCosts(user.id, range, 30),
         recentRuns(user.id, 20),
+        perModelCosts(user.id, range),
+        perToolUsage(user.id, range),
       ]);
-      return NextResponse.json({ summary, balance: currentBalance, perAgent, perDay, recent });
+      return NextResponse.json({ summary, balance: currentBalance, perAgent, perDay, recent, perModel, perTool });
     }
     default:
-      return NextResponse.json({ error: "groupBy must be summary | agent | day | recent | all" }, { status: 400 });
+      return NextResponse.json({ error: "groupBy must be summary | agent | day | recent | model | tool | all" }, { status: 400 });
   }
 }

@@ -36,6 +36,9 @@ interface CostsResponse {
     kind: string; status: string; startedAt: number; endedAt: number | null;
     costCredits: number; inputTokens: number; outputTokens: number; cacheReadTokens: number;
   }>;
+  // P45 — per-model + per-tool rollups
+  perModel?: Array<{ model: string; runs: number; inputTokens: number; outputTokens: number; costCredits: number }>;
+  perTool?: Array<{ tool: string; calls: number; totalMs: number; avgMs: number }>;
 }
 
 type Window = "24h" | "7d" | "30d" | "all";
@@ -140,6 +143,72 @@ export default function CostsPage() {
                         </span>
                         <span style={{ textAlign: "right", fontSize: 12, color: "var(--text-muted)" }}>
                           {a.avgLatencyMs ? `${(a.avgLatencyMs / 1000).toFixed(1)}s` : "—"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* P45 — Per-model breakdown */}
+              {data.perModel && data.perModel.length > 0 && (
+                <div style={{ marginBottom: 32 }}>
+                  <div className="h-section" style={{ marginBottom: 12 }}>Per model</div>
+                  <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1.4fr 70px 110px 100px",
+                      padding: "10px 14px", background: "var(--bg-elevated)", fontSize: 11, fontWeight: 600,
+                      color: "var(--text-muted)", letterSpacing: 0.5 }}>
+                      <span>MODEL</span>
+                      <span style={{ textAlign: "right" }}>RUNS</span>
+                      <span style={{ textAlign: "right" }}>TOKENS</span>
+                      <span style={{ textAlign: "right" }}>COST</span>
+                    </div>
+                    {data.perModel.map((m: any) => (
+                      <div key={m.model} style={{
+                        display: "grid", gridTemplateColumns: "1.4fr 70px 110px 100px",
+                        padding: "10px 14px", borderTop: "1px solid var(--border)",
+                        fontSize: 13, alignItems: "center",
+                      }}>
+                        <span style={{ fontWeight: 500, fontFamily: "JetBrains Mono, monospace", fontSize: 12 }}>{m.model}</span>
+                        <span style={{ textAlign: "right" }}>{m.runs.toLocaleString()}</span>
+                        <span style={{ textAlign: "right", fontSize: 12, color: "var(--text-muted)" }}>
+                          {(m.inputTokens + m.outputTokens).toLocaleString()}
+                        </span>
+                        <span style={{ textAlign: "right", fontWeight: 500 }}>
+                          ${(m.costCredits * 0.001).toFixed(3)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* P45 — Per-tool usage */}
+              {data.perTool && data.perTool.length > 0 && (
+                <div style={{ marginBottom: 32 }}>
+                  <div className="h-section" style={{ marginBottom: 12 }}>Tool usage</div>
+                  <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1.4fr 70px 90px 100px",
+                      padding: "10px 14px", background: "var(--bg-elevated)", fontSize: 11, fontWeight: 600,
+                      color: "var(--text-muted)", letterSpacing: 0.5 }}>
+                      <span>TOOL</span>
+                      <span style={{ textAlign: "right" }}>CALLS</span>
+                      <span style={{ textAlign: "right" }}>AVG</span>
+                      <span style={{ textAlign: "right" }}>TOTAL TIME</span>
+                    </div>
+                    {data.perTool.map((t: any) => (
+                      <div key={t.tool} style={{
+                        display: "grid", gridTemplateColumns: "1.4fr 70px 90px 100px",
+                        padding: "10px 14px", borderTop: "1px solid var(--border)",
+                        fontSize: 13, alignItems: "center",
+                      }}>
+                        <span style={{ fontWeight: 500, fontFamily: "JetBrains Mono, monospace", fontSize: 12 }}>{t.tool}</span>
+                        <span style={{ textAlign: "right" }}>{t.calls.toLocaleString()}</span>
+                        <span style={{ textAlign: "right", fontSize: 12, color: "var(--text-muted)" }}>
+                          {(t.avgMs / 1000).toFixed(2)}s
+                        </span>
+                        <span style={{ textAlign: "right", fontWeight: 500 }}>
+                          {(t.totalMs / 1000).toFixed(1)}s
                         </span>
                       </div>
                     ))}

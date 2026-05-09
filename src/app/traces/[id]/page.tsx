@@ -194,6 +194,16 @@ export default function TraceViewerPage() {
             )}
           </div>
 
+          {/* P45 — per-phase latency breakdown. Aggregates durationMs by
+              eventType so operators can see "where did the time go" at a
+              glance without scrubbing the full timeline. */}
+          {events.some(e => e.durationMs) && (
+            <div style={{ marginBottom: 24 }}>
+              <div className="h-section" style={{ marginBottom: 10 }}>Latency breakdown</div>
+              <PhaseBreakdown events={events} totalDurationMs={duration || 0} />
+            </div>
+          )}
+
           {/* Actions */}
           <div style={{ display: "flex", gap: 8, marginBottom: 24 }}>
             <button className="btn btn-primary" disabled={actionBusy} onClick={replay}
@@ -296,3 +306,82 @@ function summarizePayload(type: string, p: any): string {
   }
 }
 function truncate(s: string, n: number) { return s.length > n ? s.slice(0, n) + "…" : s; }
+
+// P45 — Per-phase latency. Bucket events by their high-level phase (LLM,
+// tools, memory, prompt, browser, sandbox, other), sum durations, render
+// as a stacked bar with side-by-side numeric breakdown.
+function PhaseBreakdown({ events, totalDurationMs }: {
+  events: Event[]; totalDurationMs: number;
+}) {
+  const PHASE_FOR: Record<string, string> = {
+    prompt_compiled: "Prompt compile",
+    llm_call: "LLM call",
+    tool_call: "Tool call",
+    tool_result: "Tool call",
+    memory_read: "Memory",
+    memory_write: "Memory",
+    cache_hit: "Cache",
+    cache_miss: "Cache",
+    retry: "Retry",
+    subagent_dispatch: "Subagent",
+    subagent_complete: "Subagent",
+  };
+  const PHASE_COLOR: Record<string, string> = {
+    "LLM call":       "#3b82f6",
+    "Tool call":      "#22c55e",
+    "Memory":         "#06b6d4",
+    "Prompt compile": "#a855f7",
+    "Cache":          "#10b981",
+    "Retry":          "#eab308",
+    "Subagent":       "#8b5cf6",
+    "Other":          "#94a3b8",
+  };
+  const totals: Record<string, number> = {};
+  for (const e of events) {
+    if (!e.durationMs) continue;
+    const phase = PHASE_FOR[e.eventType] || "Other";
+    totals[phase] = (totals[phase] || 0) + e.durationMs;
+  }
+  const tracked = Object.values(totals).reduce((s, v) => s + v, 0);
+  const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+
+  return (
+    <div className="card" style={{ padding: 16 }}>
+      {/* Stacked bar */}
+      <div style={{ display: "flex", height: 24, borderRadius: 6, overflow: "hidden", marginBottom: 12, background: "var(--bg-subtle)" }}>
+        {sorted.map(([phase, ms]) => {
+          const pct = (ms / Math.max(tracked, 1)) * 100;
+          return (
+            <div key={phase} title={`${phase}: ${(ms / 1000).toFixed(2)}s (${pct.toFixed(0)}%)`}
+              style={{ width: `${pct}%`, background: PHASE_COLOR[phase], height: "100%" }} />
+          );
+        })}
+      </div>
+      {/* Legend / numeric breakdown */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10 }}>
+        {sorted.map(([phase, ms]) => (
+          <div key={phase} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: PHASE_COLOR[phase], flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 600 }}>{phase}</div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {(ms / 1000).toFixed(2)}s · {((ms / Math.max(tracked, 1)) * 100).toFixed(0)}%
+              </div>
+            </div>
+          </div>
+        ))}
+        {totalDurationMs > tracked && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ width: 10, height: 10, borderRadius: 2, background: "var(--border)", flexShrink: 0 }} />
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--text-muted)" }}>Untracked</div>
+              <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {((totalDurationMs - tracked) / 1000).toFixed(2)}s · gaps between events
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

@@ -164,6 +164,82 @@ export interface RecentRun {
   cacheReadTokens: number;
 }
 
+// P45 — per-model cost rollup. Joins trace_runs to its llm_call events to
+// derive which model handled the run; sums tokens + costs by model. Runs
+// that span multiple models (rare) are attributed to the last-seen model
+// in the trace.
+export interface PerModelCost {
+  model: string;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  costCredits: number;
+}
+
+export async function perModelCosts(userId: string, range: CostRange = {}): Promise<PerModelCost[]> {
+  const r = rangeClause(range);
+  const result = await pool().query(`
+    SELECT
+      COALESCE(e.payload->>'model', 'unknown') AS model,
+      COUNT(DISTINCT tr.id)::int                AS runs,
+      COALESCE(SUM(tr."totalInputTokens"), 0)::int  AS in_tok,
+      COALESCE(SUM(tr."totalOutputTokens"), 0)::int AS out_tok,
+      COALESCE(SUM(tr."totalCostCredits"), 0)::int  AS cost
+    FROM trace_runs tr
+    LEFT JOIN LATERAL (
+      SELECT payload FROM trace_events
+      WHERE "runId" = tr.id AND "eventType" = 'llm_call'
+      ORDER BY "ts" DESC LIMIT 1
+    ) e ON TRUE
+    WHERE tr."userId" = $1 AND tr.status = 'succeeded' ${r.clause}
+    GROUP BY model
+    ORDER BY cost DESC
+  `, [userId, ...r.params]);
+  return result.rows.map((row: any) => ({
+    model: row.model,
+    runs: Number(row.runs || 0),
+    inputTokens: Number(row.in_tok || 0),
+    outputTokens: Number(row.out_tok || 0),
+    costCredits: Number(row.cost || 0),
+  }));
+}
+
+// P45 — per-tool usage rollup. Counts tool_call events by tool name and
+// derives a rough latency-per-tool. Cost-per-tool would require per-call
+// token tracking which we don't yet do; instead surface call-count +
+// total time as a proxy for "where the work went."
+export interface PerToolUsage {
+  tool: string;
+  calls: number;
+  totalMs: number;
+  avgMs: number;
+}
+
+export async function perToolUsage(userId: string, range: CostRange = {}): Promise<PerToolUsage[]> {
+  const params: any[] = [userId];
+  let dateClause = "";
+  if (range.from) { params.push(range.from); dateClause += ` AND e."ts" >= $${params.length}`; }
+  if (range.to)   { params.push(range.to);   dateClause += ` AND e."ts" < $${params.length}`; }
+  const result = await pool().query(`
+    SELECT
+      payload->>'name'           AS tool,
+      COUNT(*)::int              AS calls,
+      COALESCE(SUM("durationMs"), 0)::int AS total_ms
+    FROM trace_events e
+    WHERE "eventType" = 'tool_call'
+      AND EXISTS (SELECT 1 FROM trace_runs r WHERE r.id = e."runId" AND r."userId" = $1)
+      ${dateClause}
+    GROUP BY tool
+    ORDER BY calls DESC
+    LIMIT 30
+  `, params);
+  return result.rows.map((row: any) => {
+    const calls = Number(row.calls || 0);
+    const totalMs = Number(row.total_ms || 0);
+    return { tool: row.tool || "unknown", calls, totalMs, avgMs: calls > 0 ? Math.round(totalMs / calls) : 0 };
+  });
+}
+
 export async function recentRuns(userId: string, limit = 20): Promise<RecentRun[]> {
   const result = await pool().query(`
     SELECT
