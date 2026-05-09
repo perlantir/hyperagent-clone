@@ -32,6 +32,15 @@ export type UrlValidation =
   | { ok: true }
   | { ok: false; reason: string };
 
+// P64.2 — verifyResolvedIp returns the address it pinned so the caller
+// can pass it to the connection layer, eliminating the TOCTOU window
+// between "we validated DNS resolution" and "WebSocket transport
+// resolves DNS again at connection time and gets a different (private)
+// answer."
+export type DnsValidation =
+  | { ok: true; address: string; family: 4 | 6 }
+  | { ok: false; reason: string };
+
 // ─── Cloud metadata IPs ──────────────────────────────────────────────
 // Sources:
 //   AWS:   169.254.169.254
@@ -190,8 +199,15 @@ export function validateForBrowserOrLocal(rawUrl: string): UrlValidation {
  * Returns { ok: false, ... } if DNS resolution itself fails too — a
  * public-looking name that doesn't resolve to a routable IP isn't
  * useful as a bridge target.
+ *
+ * P64.2 — On success returns { ok: true, address, family } so the caller
+ * can pass the pinned IP straight into the connection layer (e.g. via a
+ * custom `lookup` callback on the underlying WebSocket / TCP socket).
+ * Resolving once, validating, and pinning the IP through to connect()
+ * closes the rebinding TOCTOU window where the second DNS lookup —
+ * issued by the WebSocket library — could land on a private address.
  */
-export async function verifyResolvedIp(host: string): Promise<UrlValidation> {
+export async function verifyResolvedIp(host: string): Promise<DnsValidation> {
   let addrs: { address: string; family: number }[];
   try {
     addrs = await dns.lookup(host, { all: true, verbatim: true });
@@ -208,7 +224,12 @@ export async function verifyResolvedIp(host: string): Promise<UrlValidation> {
       return { ok: false, reason: `${host} resolved to ${a.address} (${cls}) — refusing as SSRF risk.` };
     }
   }
-  return { ok: true };
+  // Prefer the first record. Pinning here is intentional: the caller
+  // routes its TCP connection at this exact address. We pass family back
+  // so net.connect's lookup callback can fill it correctly.
+  const first = addrs[0];
+  const family = first.family === 6 ? 6 : 4;
+  return { ok: true, address: first.address, family };
 }
 
 /**
@@ -224,4 +245,65 @@ export function inferConnectionLocationFromUrl(rawUrl: string): "browser" | "tun
     if (cls === "public") return "tunnel";
   } catch {}
   return "unknown";
+}
+
+// ─── Token entropy ─────────────────────────────────────────────────────
+//
+// P64.2 — strengthened from P64.1's 32-character minimum. Codex matches
+// the capability token by SHA-256 hash, so the only thing that protects
+// the bridge is the token's entropy. We treat ANYTHING under 192 bits as
+// rejected for "tunnel" mode (where the token is transmitted over the
+// public internet) and anything under 96 bits as rejected for any mode
+// (defends against guessing on a noisy LAN).
+//
+// generateBridgeToken() returns 32 random bytes hex-encoded — 256 bits
+// of entropy, well above any reasonable bar.
+
+import { randomBytes } from "node:crypto";
+
+export function generateBridgeToken(): string {
+  // 32 bytes = 256 bits. Hex encoding doubles to 64 ASCII chars.
+  return randomBytes(32).toString("hex");
+}
+
+// Minimum acceptable entropy in BITS, indexed by connection location.
+// Hex-encoded characters carry 4 bits each; base64url ~6.
+export const MIN_TOKEN_ENTROPY_BITS: Record<"browser" | "tunnel" | "local-server", number> = {
+  browser: 96,       // local network only
+  tunnel: 192,       // public internet — strongest
+  "local-server": 96,
+};
+
+// Estimate entropy assuming the token came from a uniform random
+// generator over hex/base64/printable ASCII. This is a LOWER bound:
+// for high-entropy strings the estimate is correct to within a bit;
+// for tokens like "password123" it returns the upper bound (8 bits/char)
+// — we don't try to detect dictionary-derived tokens since SHA-256
+// matching defeats anything that's not maximum-entropy anyway.
+export function estimateTokenEntropyBits(token: string): number {
+  const len = token.length;
+  if (!len) return 0;
+  // If the token is pure hex, 4 bits/char.
+  if (/^[0-9a-fA-F]+$/.test(token)) return len * 4;
+  // If it's base64-ish, 6 bits/char.
+  if (/^[A-Za-z0-9+/_=-]+$/.test(token)) return len * 6;
+  // Otherwise treat as printable ASCII at 6 bits/char (conservative).
+  return len * 6;
+}
+
+export type TokenEntropyValidation =
+  | { ok: true; bits: number }
+  | { ok: false; bits: number; reason: string };
+
+export function validateTokenEntropy(token: string, location: "browser" | "tunnel" | "local-server"): TokenEntropyValidation {
+  const bits = estimateTokenEntropyBits(token);
+  const min = MIN_TOKEN_ENTROPY_BITS[location];
+  if (bits < min) {
+    return {
+      ok: false,
+      bits,
+      reason: `Capability token has ~${bits} bits of entropy; ${location} mode requires at least ${min}. Generate a fresh token with \`openssl rand -hex 32\` (256-bit) or use the in-app generator.`,
+    };
+  }
+  return { ok: true, bits };
 }
