@@ -712,6 +712,11 @@ export async function createSchedule(s: Omit<Schedule,"id"|"createdAt"|"lastRunA
 export async function updateSchedule(id: string, fields: Partial<Schedule>) {
   if (fields.active !== undefined) await q(`UPDATE schedules SET active=$1 WHERE id=$2`, [fields.active, id]);
   if (fields.lastRunAt !== undefined) await q(`UPDATE schedules SET "lastRunAt"=$1 WHERE id=$2`, [fields.lastRunAt, id]);
+  // P51 — full edit support so the live page UI can rename / re-prompt /
+  // change cadence on an existing schedule without delete-and-recreate.
+  if (fields.name !== undefined) await q(`UPDATE schedules SET name=$1 WHERE id=$2`, [fields.name, id]);
+  if (fields.prompt !== undefined) await q(`UPDATE schedules SET prompt=$1 WHERE id=$2`, [fields.prompt, id]);
+  if (fields.intervalMinutes !== undefined) await q(`UPDATE schedules SET "intervalMinutes"=$1 WHERE id=$2`, [Math.max(1, fields.intervalMinutes), id]);
 }
 export async function deleteSchedule(id: string, userId: string) {
   await q(`DELETE FROM schedules WHERE id=$1 AND "userId"=$2`, [id, userId]);

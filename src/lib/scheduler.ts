@@ -69,7 +69,12 @@ async function runSchedule(scheduleId: string) {
     await createMessage({ threadId: thread.id, role: "user", content: s.prompt });
     const assistantMsg = await createMessage({ threadId: thread.id, role: "assistant", content: "" });
 
-    const { tools } = await resolveAllTools(s.userId, agent.tools);
+    // P47 alignment — cron-fired schedules honor the agent's per-toolkit
+    // and per-action scopes the same way chat + manual /run do.
+    const { tools } = await resolveAllTools(s.userId, agent.tools, {
+      connectorIds: agent.connectorIds,
+      connectorScopes: agent.connectorScopes,
+    });
 
     // P23 + P25 — layered prompt + T1/T2 memory retrieval. The schedule's
     // prompt is the cosine query — usually a recurring instruction so its

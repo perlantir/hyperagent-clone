@@ -1,15 +1,23 @@
 "use client";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
+import { useToast } from "@/components/Toast";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 export default function LivePage() {
+  const router = useRouter();
+  const toast = useToast();
+  const confirm = useConfirm();
   const [schedules, setSchedules] = useState<any[]>([]);
   const [runs, setRuns] = useState<any[]>([]);
   const [agents, setAgents] = useState<any[]>([]);
   const [templates, setTemplates] = useState<any[]>([]);
   const [openTpl, setOpenTpl] = useState<any | null>(null);
   const [openCustom, setOpenCustom] = useState(false);
+  const [editing, setEditing] = useState<any | null>(null);
+  const [running, setRunning] = useState<string | null>(null);
   const [name, setName] = useState(""); const [prompt, setPrompt] = useState(""); const [agentId, setAgentId] = useState(""); const [intervalMin, setIntervalMin] = useState(60);
 
   async function reload() {
@@ -24,16 +32,50 @@ export default function LivePage() {
   useEffect(() => { reload(); const i = window.setInterval(reload, 10000); return () => clearInterval(i); }, []);
 
   async function createSchedule(payload: { agentId: string; prompt: string; intervalMinutes: number; name: string }) {
-    await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const r = await fetch("/api/schedules", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    if (!r.ok) { toast.error("Could not create schedule"); return; }
+    toast.success("Activated", `${payload.name} will run every ${payload.intervalMinutes}m.`);
     setOpenTpl(null); setOpenCustom(false); setName(""); setPrompt(""); reload();
+  }
+  async function saveEdit() {
+    if (!editing) return;
+    const r = await fetch(`/api/schedules/${editing.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, prompt, intervalMinutes: intervalMin }),
+    });
+    if (!r.ok) { toast.error("Save failed"); return; }
+    toast.success("Saved");
+    setEditing(null); reload();
   }
   async function toggle(id: string, active: number) {
     await fetch(`/api/schedules/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ active: active ? 0 : 1 }) });
     reload();
   }
+  async function runNow(id: string) {
+    setRunning(id);
+    try {
+      const r = await fetch(`/api/schedules/${id}/run`, { method: "POST" });
+      const j = await r.json();
+      if (!r.ok || !j.ok) {
+        toast.error("Run failed", j.error || "Check your agent configuration and credit balance.");
+      } else {
+        toast.success("Run completed", j.threadId ? "Open the thread to inspect the output." : "Output captured.");
+        if (j.threadId) router.push(`/threads/${j.threadId}`);
+      }
+      reload();
+    } finally {
+      setRunning(null);
+    }
+  }
   async function del(id: string) {
+    const ok = await confirm({
+      title: "Delete this schedule?",
+      body: "Removes the schedule and all its run history.",
+      confirmLabel: "Delete", variant: "destructive",
+    });
+    if (!ok) return;
     await fetch(`/api/schedules/${id}`, { method: "DELETE" });
-    reload();
+    toast.success("Deleted"); reload();
   }
 
   return (
@@ -50,17 +92,29 @@ export default function LivePage() {
           ) : schedules.map(s => {
             const a = agents.find(x => x.id === s.agentId);
             return (
-              <div key={s.id} className="card" style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 16, padding: "14px 18px" }}>
+              <div key={s.id} className="card" style={{ marginBottom: 8, display: "flex", alignItems: "center", gap: 12, padding: "14px 18px" }}>
                 <div style={{ width: 10, height: 10, borderRadius: 99, background: s.active ? "var(--green)" : "var(--text-faint)", boxShadow: s.active ? "0 0 0 4px var(--green-bg)" : "none" }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14.5, fontWeight: 600 }}>{s.name}</div>
-                  <div style={{ fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a?.name || "—"} · every {s.intervalMinutes}m · last run {s.lastRunAt ? new Date(s.lastRunAt).toLocaleString() : "—"}</div>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a?.name || "—"} · every {s.intervalMinutes}m · last run {s.lastRunAt ? new Date(s.lastRunAt).toLocaleString() : "never"}</div>
                 </div>
+                <button className="chip" onClick={() => runNow(s.id)} disabled={running === s.id}
+                  title="Run this schedule now and route to the resulting thread">
+                  {running === s.id ? "Running…" : "▶ Run now"}
+                </button>
+                <button className="chip" onClick={() => { setEditing(s); setName(s.name); setPrompt(s.prompt); setIntervalMin(s.intervalMinutes); }}>Edit</button>
                 <button className="chip" onClick={() => toggle(s.id, s.active)}>{s.active ? "Pause" : "Resume"}</button>
                 <button className="chip" onClick={() => del(s.id)}>Delete</button>
               </div>
             );
           })}
+
+          {/* P51 — cron cadence note. Vercel cron fires the scheduler every
+              5 minutes, so a schedule with intervalMinutes < 5 effectively
+              rounds up. Run-now bypasses cron for instant verification. */}
+          <div style={{ fontSize: 11.5, color: "var(--text-faint)", marginTop: 10, lineHeight: 1.5 }}>
+            Cron fires every 5 minutes. Schedules with intervals shorter than that round up to the next tick. Click Run now to fire immediately.
+          </div>
 
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 40, marginBottom: 12 }}>
             <div className="h-section">Templates</div>
@@ -116,6 +170,27 @@ export default function LivePage() {
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
               <button className="btn" onClick={() => { setOpenTpl(null); setOpenCustom(false); }}>Cancel</button>
               <button className="btn btn-primary" disabled={!agentId || !prompt || !name} onClick={() => createSchedule({ agentId, prompt, intervalMinutes: intervalMin, name })}>Activate</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* P51 — Edit-existing-schedule modal. Reuses the name/prompt/interval
+          inputs but doesn't change the agent (creating a fresh schedule is
+          still the path for "swap to a different agent"). */}
+      {editing && (
+        <div onClick={() => setEditing(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "grid", placeItems: "center", zIndex: 100, backdropFilter: "blur(4px)" }}>
+          <div onClick={e => e.stopPropagation()} className="card" style={{ width: 540, padding: 24, maxHeight: "80vh", overflowY: "auto" }}>
+            <h2 className="h-display" style={{ fontSize: 28, marginBottom: 4 }}>Edit schedule</h2>
+            <p style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 16 }}>Update the name, prompt, or cadence. To swap agents, delete and recreate.</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              <div><label className="h-section">Name</label><input className="input" value={name} onChange={e => setName(e.target.value)} style={{ marginTop: 6 }} /></div>
+              <div><label className="h-section">Prompt</label><textarea className="input" rows={5} value={prompt} onChange={e => setPrompt(e.target.value)} style={{ marginTop: 6, fontFamily: "JetBrains Mono, monospace", fontSize: 12.5 }} /></div>
+              <div><label className="h-section">Interval (minutes)</label><input className="input" type="number" value={intervalMin} onChange={e => setIntervalMin(parseInt(e.target.value || "60"))} style={{ marginTop: 6 }} /></div>
+            </div>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 20 }}>
+              <button className="btn" onClick={() => setEditing(null)}>Cancel</button>
+              <button className="btn btn-primary" disabled={!prompt || !name} onClick={saveEdit}>Save</button>
             </div>
           </div>
         </div>
