@@ -21,6 +21,7 @@ import type { AgentLike, TabKey, TabDef } from "@/components/agent-builder/types
 import { NATIVE_TOOL_CATALOG } from "@/components/agent-builder/types";
 import { SummarySidebar } from "@/components/agent-builder/SummarySidebar";
 import { ConfigTab } from "@/components/agent-builder/ConfigTab";
+import { InlineTestPanel } from "@/components/agent-builder/InlineTestPanel";
 import {
   InvocationsTab, IntegrationsTab, ToolsTab, MemoryTab,
   SkillsTab, KnowledgeTab, RubricsTab, LibraryTab, SecurityTab,
@@ -51,6 +52,10 @@ export default function AgentBuilderPage({ params }: { params: { id: string } })
   });
   const [showHistory, setShowHistory] = useState(false);
   const [versions, setVersions] = useState<any[]>([]);
+  // P46 — inline test panel toggle. promptVersion bumps every save so the
+  // test panel can flag stale conversations.
+  const [showTest, setShowTest] = useState(false);
+  const [promptVersion, setPromptVersion] = useState(0);
 
   const reload = useCallback(async () => {
     const j = await fetch(`/api/agents/${params.id}`).then(r => r.json());
@@ -101,6 +106,8 @@ export default function AgentBuilderPage({ params }: { params: { id: string } })
       toast.success("Agent updated", "A version snapshot was saved to history.");
       reload();
       if (showHistory) loadVersions();
+      // Bump promptVersion so the inline test panel can show its drift hint.
+      setPromptVersion(v => v + 1);
     } else {
       toast.error("Save failed", (await r.json().catch(() => ({}))).error);
     }
@@ -153,6 +160,17 @@ export default function AgentBuilderPage({ params }: { params: { id: string } })
         }
         actions={
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button
+              className="btn"
+              onClick={() => setShowTest(s => !s)}
+              style={showTest ? {
+                background: "var(--accent)", color: "white",
+                borderColor: "var(--accent)",
+              } : undefined}
+              title="Quick-test the agent without leaving the builder"
+            >
+              {showTest ? "● Testing" : "▶ Test"}
+            </button>
             <button className="btn" onClick={() => { setShowHistory(s => !s); if (!showHistory) loadVersions(); }}>
               History {versions.length > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: "var(--text-muted)" }}>({versions.length})</span>}
             </button>
@@ -227,6 +245,15 @@ export default function AgentBuilderPage({ params }: { params: { id: string } })
           counts={counts}
           onJumpToTab={(t) => { setTab(t); setShowHistory(false); }}
         />
+
+        {/* P46 — inline test panel (toggleable, sits beside SummarySidebar) */}
+        {showTest && (
+          <InlineTestPanel
+            agentId={params.id}
+            systemPromptVersion={promptVersion}
+            onClose={() => setShowTest(false)}
+          />
+        )}
       </div>
     </AppShell>
   );
