@@ -12,6 +12,7 @@ const NAV: NavLink[] = [
   { href: "/integrations",    label: "Integrations",   icon: "⊟" },
   { href: "/live",            label: "Live mode",      icon: "●" },
   { href: "/command-center",  label: "Command Center", icon: "◉" },
+  { href: "/evals",           label: "Evaluations",    icon: "★" },
   { href: "/audit",           label: "Audit log",      icon: "◐" },
   { href: "/costs",           label: "Costs",          icon: "$" },
   { href: "/billing",         label: "Billing",        icon: "+" },

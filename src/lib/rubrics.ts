@@ -412,3 +412,163 @@ export async function listRecentEvaluations(userId: string, limit = 50): Promise
   `, [userId, limit]);
   return r.rows;
 }
+
+// P48 — aggregate stats for the eval-history dashboard.
+//
+// Returns a single payload covering everything the UI renders:
+//   summary       — totals across the filtered window
+//   daily         — pass rate / avg score per UTC day (most recent 90)
+//   perCriterion  — avg score + pass/fail counts grouped by criterion name
+//                   (unnested out of the JSONB findings array)
+//   perRubric     — totals per rubric so users see which rubrics they actually run
+//   topFailing    — recent failing evaluations with the first failing
+//                   finding's reasoning surfaced for the "what went wrong" feed
+export interface EvalAggregateOpts {
+  rubricId?: string | null;
+  agentId?: string | null;
+  from?: number;     // unix ms
+  to?: number;       // unix ms
+}
+export async function aggregateEvaluations(userId: string, opts: EvalAggregateOpts = {}): Promise<{
+  summary: { total: number; passed: number; failed: number; avgScore: number | null; passRate: number | null };
+  daily: Array<{ date: string; count: number; passed: number; avgScore: number | null }>;
+  perCriterion: Array<{ name: string; count: number; avgScore: number; passRate: number; failCount: number }>;
+  perRubric: Array<{ rubricId: string; rubricName: string; count: number; passRate: number | null; avgScore: number | null }>;
+  topFailing: Array<{ id: string; rubricId: string; rubricName: string; runId: string | null; agentId: string | null; overallScore: number | null; evaluatedAt: number; firstFailing: { criterion: string; reasoning: string } | null }>;
+}> {
+  await ensureSchema();
+  const conds: string[] = [`e."userId" = $1`];
+  const vals: any[] = [userId];
+  if (opts.rubricId) { vals.push(opts.rubricId); conds.push(`e."rubricId" = $${vals.length}`); }
+  if (opts.agentId !== undefined) {
+    if (opts.agentId === null) {
+      conds.push(`e."agentId" IS NULL`);
+    } else {
+      vals.push(opts.agentId); conds.push(`e."agentId" = $${vals.length}`);
+    }
+  }
+  if (opts.from) { vals.push(opts.from); conds.push(`e."evaluatedAt" >= $${vals.length}`); }
+  if (opts.to)   { vals.push(opts.to);   conds.push(`e."evaluatedAt" <= $${vals.length}`); }
+  const whereSql = conds.join(" AND ");
+
+  // SUMMARY ----------------------------------------------------------------
+  const sumRow = await pool().query(`
+    SELECT
+      COUNT(*)::int AS total,
+      SUM(CASE WHEN e.passed THEN 1 ELSE 0 END)::int AS passed,
+      SUM(CASE WHEN NOT e.passed THEN 1 ELSE 0 END)::int AS failed,
+      AVG(e."overallScore") AS avg_score
+    FROM rubric_evaluations e
+    WHERE ${whereSql}
+  `, vals);
+  const sumR = sumRow.rows[0] || {};
+  const total = sumR.total || 0;
+  const summary = {
+    total,
+    passed: sumR.passed || 0,
+    failed: sumR.failed || 0,
+    avgScore: sumR.avg_score !== null ? Number(sumR.avg_score) : null,
+    passRate: total > 0 ? (sumR.passed || 0) / total : null,
+  };
+
+  // DAILY SERIES ----------------------------------------------------------
+  // Bucket by UTC date. ~30-day windows in the dashboard so per-row
+  // strftime is cheap even without an index hint.
+  const dailyRows = await pool().query(`
+    SELECT
+      to_char(to_timestamp(e."evaluatedAt"/1000) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
+      COUNT(*)::int AS count,
+      SUM(CASE WHEN e.passed THEN 1 ELSE 0 END)::int AS passed,
+      AVG(e."overallScore") AS avg_score
+    FROM rubric_evaluations e
+    WHERE ${whereSql}
+    GROUP BY 1
+    ORDER BY 1 ASC
+    LIMIT 90
+  `, vals);
+  const daily = dailyRows.rows.map(r => ({
+    date: r.date,
+    count: r.count,
+    passed: r.passed,
+    avgScore: r.avg_score !== null ? Number(r.avg_score) : null,
+  }));
+
+  // PER-CRITERION ----------------------------------------------------------
+  // findings is JSONB array: [{ criterion, score, passed, reasoning }, ...]
+  // Unnest with jsonb_array_elements + group by criterion name.
+  const critRows = await pool().query(`
+    SELECT
+      f->>'criterion' AS name,
+      COUNT(*)::int AS count,
+      AVG((f->>'score')::numeric) AS avg_score,
+      SUM(CASE WHEN (f->>'passed')::boolean THEN 1 ELSE 0 END)::int AS pass_count,
+      SUM(CASE WHEN NOT (f->>'passed')::boolean THEN 1 ELSE 0 END)::int AS fail_count
+    FROM rubric_evaluations e, jsonb_array_elements(e.findings) f
+    WHERE ${whereSql} AND f->>'criterion' IS NOT NULL
+    GROUP BY 1
+    ORDER BY count DESC
+    LIMIT 30
+  `, vals);
+  const perCriterion = critRows.rows.map(r => ({
+    name: r.name,
+    count: r.count,
+    avgScore: r.avg_score !== null ? Number(r.avg_score) : 0,
+    passRate: r.count > 0 ? (r.pass_count || 0) / r.count : 0,
+    failCount: r.fail_count || 0,
+  }));
+
+  // PER-RUBRIC -------------------------------------------------------------
+  const rubricRows = await pool().query(`
+    SELECT
+      e."rubricId" AS rubric_id,
+      r.name AS rubric_name,
+      COUNT(*)::int AS count,
+      SUM(CASE WHEN e.passed THEN 1 ELSE 0 END)::int AS passed,
+      AVG(e."overallScore") AS avg_score
+    FROM rubric_evaluations e
+    LEFT JOIN rubrics r ON r.id = e."rubricId"
+    WHERE ${whereSql}
+    GROUP BY 1, 2
+    ORDER BY count DESC
+    LIMIT 20
+  `, vals);
+  const perRubric = rubricRows.rows.map(r => ({
+    rubricId: r.rubric_id,
+    rubricName: r.rubric_name || r.rubric_id,
+    count: r.count,
+    passRate: r.count > 0 ? (r.passed || 0) / r.count : null,
+    avgScore: r.avg_score !== null ? Number(r.avg_score) : null,
+  }));
+
+  // TOP FAILING -----------------------------------------------------------
+  const failingRows = await pool().query(`
+    SELECT
+      e.id, e."rubricId", r.name AS rubric_name,
+      e."runId", e."agentId", e."overallScore", e."evaluatedAt",
+      e.findings
+    FROM rubric_evaluations e
+    LEFT JOIN rubrics r ON r.id = e."rubricId"
+    WHERE ${whereSql} AND e.passed = FALSE
+    ORDER BY e."evaluatedAt" DESC
+    LIMIT 10
+  `, vals);
+  const topFailing = failingRows.rows.map(r => {
+    const findings: any[] = Array.isArray(r.findings) ? r.findings : [];
+    const firstFail = findings.find(f => f && f.passed === false);
+    return {
+      id: String(r.id),
+      rubricId: r.rubricId,
+      rubricName: r.rubric_name || r.rubricId,
+      runId: r.runId || null,
+      agentId: r.agentId || null,
+      overallScore: r.overallScore !== null ? Number(r.overallScore) : null,
+      evaluatedAt: Number(r.evaluatedAt),
+      firstFailing: firstFail ? {
+        criterion: firstFail.criterion || "—",
+        reasoning: typeof firstFail.reasoning === "string" ? firstFail.reasoning.slice(0, 240) : "",
+      } : null,
+    };
+  });
+
+  return { summary, daily, perCriterion, perRubric, topFailing };
+}
