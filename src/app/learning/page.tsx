@@ -9,11 +9,15 @@ import { MemoryCard } from "@/components/MemoryCard";
 import { RubricCard } from "@/components/RubricCard";
 import { ImprovementProposalCard } from "@/components/ImprovementProposalCard";
 import { CompactionProposalCard } from "@/components/CompactionProposalCard";
+import { useToast } from "@/components/Toast";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 type Tab = "memories" | "rubrics" | "improvements" | "skills";
 type MemoryFilter = "all" | "proposed" | "accepted";
 
 export default function LearningPage() {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [tab, setTab] = useState<Tab>("memories");
 
   const [memories, setMemories] = useState<any[]>([]);
@@ -195,8 +199,13 @@ export default function LearningPage() {
                     <button className="btn" style={{ fontSize: 12, padding: "6px 14px" }}
                       onClick={async () => {
                         const r = await fetch("/api/memories/compact", { method: "POST" }).then(r => r.json());
-                        alert(`Scanned ${r.pairs} pairs, generated ${r.proposals} proposals.`);
                         loadImprovements();
+                        toast.info(
+                          `Scanned ${r.pairs} pair${r.pairs === 1 ? "" : "s"}`,
+                          r.proposals > 0
+                            ? `${r.proposals} compaction proposal${r.proposals === 1 ? "" : "s"} generated.`
+                            : "No redundant memories detected.",
+                        );
                       }}>
                       Scan for memory compaction
                     </button>
@@ -221,9 +230,16 @@ export default function LearningPage() {
                   </div>
                   <button className="btn" style={{ fontSize: 11, padding: "4px 10px", marginTop: 8 }}
                     onClick={async () => {
-                      if (!confirm(`Delete skill "${s.name}"?`)) return;
+                      const ok = await confirm({
+                        title: `Delete "${s.name}"?`,
+                        body: "This skill will no longer be available to your agents.",
+                        confirmLabel: "Delete",
+                        variant: "destructive",
+                      });
+                      if (!ok) return;
                       await fetch(`/api/skills/${s.id}`, { method: "DELETE" });
                       loadSkills();
+                      toast.success("Skill deleted");
                     }}>Delete</button>
                 </div>
               ))}

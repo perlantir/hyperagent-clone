@@ -8,6 +8,9 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
+import { useToast } from "@/components/Toast";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { Skeleton, SkeletonStatGrid, SkeletonRow } from "@/components/Skeleton";
 
 interface Event {
   id: number;
@@ -63,6 +66,8 @@ const EVENT_COLORS: Record<string, string> = {
 export default function TraceViewerPage() {
   const params = useParams();
   const router = useRouter();
+  const toast = useToast();
+  const confirm = useConfirm();
   const id = params?.id as string;
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
@@ -78,16 +83,20 @@ export default function TraceViewerPage() {
   useEffect(() => { if (id) load(); }, [id]);
 
   async function replay() {
-    if (!confirm("Replay this run? A new thread will be created with the same input — the agent runs against its current configuration.")) return;
+    const ok = await confirm({
+      title: "Replay this run?",
+      body: "A new thread will be created with the same input. The agent runs against its current configuration — not the version that was live at the original run.",
+      confirmLabel: "Replay",
+    });
+    if (!ok) return;
     setActionBusy(true);
     const r = await fetch(`/api/traces/${id}/replay`, { method: "POST" });
     setActionBusy(false);
     const j = await r.json();
     if (j.threadId) {
-      // Pass the seed message via the URL hash so the chat input pre-fills.
       const hash = j.seed ? `#seed=${encodeURIComponent(j.seed)}` : "";
       router.push(`/threads/${j.threadId}${hash}`);
-    } else alert(j.error || "Replay failed");
+    } else toast.error("Replay failed", j.error || undefined);
   }
 
   async function fork() {
@@ -98,7 +107,7 @@ export default function TraceViewerPage() {
     if (j.threadId) {
       const hash = j.seed ? `#seed=${encodeURIComponent(j.seed)}` : "";
       router.push(`/threads/${j.threadId}${hash}`);
-    } else alert(j.error || "Fork failed");
+    } else toast.error("Fork failed", j.error || undefined);
   }
 
   if (error) {
@@ -114,7 +123,18 @@ export default function TraceViewerPage() {
     return (
       <AppShell>
         <Topbar title="Trace" />
-        <div style={{ padding: 40, color: "var(--text-muted)" }}>Loading…</div>
+        <div style={{ overflowY: "auto", padding: "32px 48px" }}>
+          <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+            <Skeleton width={120} height={11} style={{ marginBottom: 8 }} />
+            <Skeleton width={280} height={28} style={{ marginBottom: 24 }} />
+            <SkeletonStatGrid count={6} />
+            <div style={{ height: 24 }} />
+            <Skeleton width={140} height={12} style={{ marginBottom: 12 }} />
+            <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+              {Array.from({ length: 6 }).map((_, i) => <SkeletonRow key={i} cols={4} />)}
+            </div>
+          </div>
+        </div>
       </AppShell>
     );
   }

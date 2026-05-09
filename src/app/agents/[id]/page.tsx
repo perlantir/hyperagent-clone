@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
+import { useToast } from "@/components/Toast";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 interface AgentVersion {
   id: string; agentId: string; version: number;
@@ -13,6 +15,8 @@ interface AgentVersion {
 
 export default function AgentPage({ params }: { params: { id: string } }) {
   const router = useRouter();
+  const toast = useToast();
+  const confirm = useConfirm();
   const [a, setA] = useState<any>(null);
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(""); const [description, setDescription] = useState("");
@@ -39,13 +43,15 @@ export default function AgentPage({ params }: { params: { id: string } }) {
   }, [params.id]);
 
   async function save() {
-    await fetch(`/api/agents/${params.id}`, {
+    const r = await fetch(`/api/agents/${params.id}`, {
       method: "PATCH", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name, description, systemPrompt, routerHint, tools }),
     });
+    if (!r.ok) { toast.error("Save failed", (await r.json().catch(() => ({}))).error); return; }
     const j = await (await fetch(`/api/agents/${params.id}`)).json();
     setA(j.agent); setEditing(false);
     loadVersions();
+    toast.success("Agent updated", "A snapshot of the previous version was saved to history.");
   }
   async function startThread() {
     const r = await fetch("/api/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId: a.id, title: `Chat with ${a.name}` }) });
@@ -53,7 +59,12 @@ export default function AgentPage({ params }: { params: { id: string } }) {
     router.push(`/threads/${j.thread.id}`);
   }
   async function rollback(version: number) {
-    if (!confirm(`Roll back to version ${version}? This creates a new version with the rolled-back state.`)) return;
+    const ok = await confirm({
+      title: `Roll back to v${version}?`,
+      body: "This creates a new version capturing the rolled-back state — the rollback itself is reversible.",
+      confirmLabel: "Roll back",
+    });
+    if (!ok) return;
     const r = await fetch(`/api/agents/${params.id}/versions`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ version }),
@@ -66,8 +77,9 @@ export default function AgentPage({ params }: { params: { id: string } }) {
       setSystemPrompt(a.agent.systemPrompt); setRouterHint(a.agent.routerHint || "");
       setTools(a.agent.tools);
       loadVersions();
+      toast.success(`Rolled back to v${version}`, `New snapshot saved as v${j.newVersion}.`);
     } else {
-      alert(j.error || "Rollback failed");
+      toast.error("Rollback failed", j.error);
     }
   }
 

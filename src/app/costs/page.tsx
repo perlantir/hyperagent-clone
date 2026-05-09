@@ -5,6 +5,7 @@
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
+import { Skeleton, SkeletonStatGrid, SkeletonRow } from "@/components/Skeleton";
 
 interface CostsResponse {
   summary: {
@@ -77,7 +78,19 @@ export default function CostsPage() {
           </div>
 
           {!data ? (
-            <div style={{ color: "var(--text-muted)", fontSize: 13, padding: 40, textAlign: "center" }}>Loading…</div>
+            <>
+              <SkeletonStatGrid count={5} minW={180} />
+              <div style={{ height: 24 }} />
+              <Skeleton width={120} height={12} style={{ marginBottom: 12 }} />
+              <div className="card" style={{ padding: 16 }}>
+                <Skeleton height={120} />
+              </div>
+              <div style={{ height: 24 }} />
+              <Skeleton width={100} height={12} style={{ marginBottom: 12 }} />
+              <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+                {Array.from({ length: 4 }).map((_, i) => <SkeletonRow key={i} cols={5} />)}
+              </div>
+            </>
           ) : (
             <>
               {/* Summary stats */}

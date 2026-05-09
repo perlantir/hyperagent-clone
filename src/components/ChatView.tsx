@@ -135,6 +135,9 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
                   <button key={p} onClick={() => setInput(p)} className="btn" style={{ textAlign: "left", padding: "12px 18px", borderRadius: 10 }}>{p}</button>
                 ))}
               </div>
+              <div style={{ marginTop: 28, fontSize: 12, color: "var(--text-faint)" }}>
+                Press <kbd style={{ padding: "1px 6px", border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg-elev)", fontSize: 11, fontFamily: "JetBrains Mono, monospace" }}>⌘K</kbd> to search threads, agents, and pages.
+              </div>
             </div>
           )}
           {routerNote && (

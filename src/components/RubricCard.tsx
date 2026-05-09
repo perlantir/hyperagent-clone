@@ -1,5 +1,7 @@
 "use client";
 import { useState } from "react";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 interface Rubric {
   id: string;
@@ -14,6 +16,8 @@ interface Rubric {
 }
 
 export function RubricCard({ rubric, onChange }: { rubric: Rubric; onChange: () => void }) {
+  const confirm = useConfirm();
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
@@ -32,11 +36,18 @@ export function RubricCard({ rubric, onChange }: { rubric: Rubric; onChange: () 
   }
 
   async function del() {
-    if (!confirm(`Delete rubric "${rubric.name}"?`)) return;
+    const ok = await confirm({
+      title: `Delete "${rubric.name}"?`,
+      body: "Past evaluations using this rubric remain in trace history, but the rubric itself can no longer be applied.",
+      confirmLabel: "Delete",
+      variant: "destructive",
+    });
+    if (!ok) return;
     setBusy(true);
     const r = await fetch(`/api/rubrics/${rubric.id}`, { method: "DELETE" });
     setBusy(false);
-    if (!r.ok) alert((await r.json()).error || "delete failed");
+    if (!r.ok) toast.error("Delete failed", (await r.json().catch(() => ({}))).error);
+    else toast.success("Rubric deleted");
     onChange();
   }
 

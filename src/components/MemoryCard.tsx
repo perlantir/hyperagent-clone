@@ -1,5 +1,7 @@
 "use client";
 import { useState } from "react";
+import { useConfirm } from "@/components/ConfirmDialog";
+import { useToast } from "@/components/Toast";
 
 interface Memory {
   id: string;
@@ -27,6 +29,8 @@ const STATE_BADGE: Record<string, { label: string; bg: string; color: string }> 
 };
 
 export function MemoryCard({ memory, onChange }: { memory: Memory; onChange: () => void }) {
+  const confirm = useConfirm();
+  const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState({ content: memory.content, importance: memory.importance });
@@ -45,11 +49,19 @@ export function MemoryCard({ memory, onChange }: { memory: Memory; onChange: () 
   }
 
   async function del() {
-    if (!confirm(`Delete memory "${memory.content.slice(0, 60)}…"?`)) return;
+    const ok = await confirm({
+      title: "Delete this memory?",
+      body: `"${memory.content.slice(0, 80)}${memory.content.length > 80 ? "…" : ""}"`,
+      confirmLabel: "Delete",
+      variant: "destructive",
+    });
+    if (!ok) return;
     setBusy(true);
-    await fetch(`/api/memories/${memory.id}`, { method: "DELETE" });
+    const r = await fetch(`/api/memories/${memory.id}`, { method: "DELETE" });
     setBusy(false);
     onChange();
+    if (r.ok) toast.success("Memory deleted");
+    else toast.error("Failed to delete memory");
   }
 
   return (

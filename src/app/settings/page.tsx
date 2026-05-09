@@ -2,6 +2,8 @@
 import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
+import { useToast } from "@/components/Toast";
+import { useConfirm } from "@/components/ConfirmDialog";
 
 function KeyRow({ provider, status, onSave, onDelete }: {
   provider: { id: string; label: string; description: string; placeholder: string; helpUrl: string };
@@ -69,6 +71,8 @@ function KeyRow({ provider, status, onSave, onDelete }: {
 }
 
 export default function SettingsPage() {
+  const toast = useToast();
+  const confirm = useConfirm();
   const [me, setMe] = useState<any>(null);
   const [prefs, setPrefs] = useState<any>({});
   const [models, setModels] = useState<any[]>([]);
@@ -116,9 +120,16 @@ export default function SettingsPage() {
     }
   }
   async function deleteSlackWorkspace(teamId: string) {
-    if (!confirm("Disconnect Slack workspace " + teamId + "?")) return;
+    const ok = await confirm({
+      title: "Disconnect Slack workspace?",
+      body: `Workspace ${teamId} will no longer route messages to your agents.`,
+      confirmLabel: "Disconnect",
+      variant: "destructive",
+    });
+    if (!ok) return;
     await fetch("/api/settings/slack-workspaces/" + teamId, { method: "DELETE" });
     reload();
+    toast.success("Slack workspace disconnected");
   }
 
   async function saveSecret(providerId: string, value: string) {
@@ -126,13 +137,19 @@ export default function SettingsPage() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ provider: providerId, value }),
     });
-    if (r.ok) reload();
-    else alert((await r.json()).error || "Failed to save");
+    if (r.ok) { reload(); toast.success(`${providerId} key saved`); }
+    else toast.error("Failed to save key", (await r.json().catch(() => ({}))).error);
   }
   async function deleteSecret(providerId: string) {
-    if (!confirm("Remove your saved key for " + providerId + "? Calls will fall back to platform default.")) return;
+    const ok = await confirm({
+      title: `Remove your ${providerId} key?`,
+      body: "Calls will fall back to the platform default.",
+      confirmLabel: "Remove key",
+      variant: "destructive",
+    });
+    if (!ok) return;
     const r = await fetch("/api/settings/secrets/" + providerId, { method: "DELETE" });
-    if (r.ok) reload();
+    if (r.ok) { reload(); toast.success("Key removed"); }
   }
 
   async function save(patch: Record<string, any>) {

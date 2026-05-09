@@ -1,6 +1,6 @@
 export type Role = "user" | "assistant";
 
-export interface User { id: string; email: string; name: string; createdAt: number; }
+export interface User { id: string; email: string; name: string; createdAt: number; onboardedAt?: number | null; }
 export interface Session { id: string; userId: string; expiresAt: number; }
 
 export interface Project { id: string; userId: string; name: string; description: string; color: string; createdAt: number; }

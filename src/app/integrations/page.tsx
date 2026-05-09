@@ -3,12 +3,14 @@ import { Suspense, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
+import { useToast } from "@/components/Toast";
 
 export default function IntegrationsPage() {
   return <Suspense fallback={null}><IntegrationsInner /></Suspense>;
 }
 
 function IntegrationsInner() {
+  const toast = useToast();
   const [connectors, setConnectors] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("connected");
@@ -48,17 +50,18 @@ function IntegrationsInner() {
         setTimeout(() => { clearInterval(poll); setConnecting(null); }, 5 * 60 * 1000);
       } else {
         setConnecting(null);
-        alert("Connect flow returned no redirect URL: " + JSON.stringify(j));
+        toast.error("Couldn't start connect flow", j.error || "No redirect URL returned.");
       }
     } catch (e: any) {
       setConnecting(null);
-      alert("Connect failed: " + e.message);
+      toast.error("Connect failed", e.message);
     }
   }
 
   async function disconnect(slug: string) {
     await fetch(`/api/connectors/${slug}`, { method: "DELETE" });
     reload();
+    toast.success(`Disconnected ${slug}`);
   }
 
   const filtered = connectors.filter(c => {

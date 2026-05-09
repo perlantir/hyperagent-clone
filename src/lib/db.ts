@@ -40,6 +40,9 @@ async function initSchema() {
       id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, "passwordHash" TEXT NOT NULL,
       name TEXT NOT NULL, "createdAt" BIGINT NOT NULL
     );
+    -- P30 — onboarding flag. Set after the user dismisses the welcome modal.
+    -- NULL = not yet onboarded; non-null = the timestamp it was completed.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS "onboardedAt" BIGINT;
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY, "userId" TEXT NOT NULL REFERENCES users(id), "expiresAt" BIGINT NOT NULL
     );
@@ -256,7 +259,10 @@ export async function getUserByEmail(email: string): Promise<(User & { passwordH
   return qOne(`SELECT * FROM users WHERE email = $1`, [email]);
 }
 export async function getUserById(id: string): Promise<User | null> {
-  return qOne(`SELECT id,email,name,"createdAt" FROM users WHERE id = $1`, [id]);
+  return qOne(`SELECT id,email,name,"createdAt","onboardedAt" FROM users WHERE id = $1`, [id]);
+}
+export async function markUserOnboarded(id: string): Promise<void> {
+  await q(`UPDATE users SET "onboardedAt"=$1 WHERE id=$2 AND "onboardedAt" IS NULL`, [Date.now(), id]);
 }
 export async function createUser(email: string, password: string, name: string): Promise<User> {
   const id = uid("u"); const now = Date.now();
@@ -276,7 +282,7 @@ export async function createSession(userId: string): Promise<string> {
 }
 export async function getSessionUser(sessionId: string): Promise<User | null> {
   return qOne(
-    `SELECT u.id,u.email,u.name,u."createdAt" FROM sessions s JOIN users u ON u.id=s."userId" WHERE s.id=$1 AND s."expiresAt">$2`,
+    `SELECT u.id,u.email,u.name,u."createdAt",u."onboardedAt" FROM sessions s JOIN users u ON u.id=s."userId" WHERE s.id=$1 AND s."expiresAt">$2`,
     [sessionId, Date.now()],
   );
 }

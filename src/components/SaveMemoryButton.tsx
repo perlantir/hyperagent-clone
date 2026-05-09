@@ -5,6 +5,7 @@
 // forceState=accepted (user-initiated saves bypass the proposal queue).
 
 import { useState } from "react";
+import { useToast } from "@/components/Toast";
 
 const CATEGORIES = [
   { value: "preference", label: "Preference" },
@@ -18,6 +19,7 @@ const CATEGORIES = [
 ];
 
 export function SaveMemoryButton({ messageText }: { messageText: string }) {
+  const toast = useToast();
   const [open, setOpen] = useState(false);
   const [content, setContent] = useState("");
   const [category, setCategory] = useState("preference");
@@ -41,9 +43,11 @@ export function SaveMemoryButton({ messageText }: { messageText: string }) {
     setSaving(false);
     if (r.ok) {
       setSaved(true);
+      toast.success("Memory saved", importance >= 8 ? "Pinned to T1 — always loaded into context." : undefined);
       setTimeout(() => { setOpen(false); setSaved(false); }, 1200);
     } else {
-      alert("Failed to save memory: " + ((await r.json()).error || "unknown"));
+      const err = (await r.json().catch(() => ({}))).error || "unknown";
+      toast.error("Failed to save memory", err);
     }
   }
 
