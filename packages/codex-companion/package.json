@@ -1,0 +1,23 @@
+{
+  "name": "hyperagent-codex-companion",
+  "version": "0.1.0-alpha.0",
+  "description": "Local companion that bridges the hosted Hyperagent app to a locally-running OpenAI Codex app-server. Experimental alpha.",
+  "license": "Apache-2.0",
+  "private": false,
+  "type": "commonjs",
+  "bin": {
+    "hyperagent-codex-companion": "./bin/hyperagent-codex-companion.js"
+  },
+  "main": "src/companion.js",
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
