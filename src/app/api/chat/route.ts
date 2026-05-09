@@ -363,9 +363,17 @@ Do not skip the planning step even if the request seems simple.`,
           const r = await runOpenAITurn({
             userId: user.id, modelId: oaModel,
             system: sys, messages: flatMessages, tools, send,
+            // P59 — pass the same toolCtx + tool resolver tables the
+            // Anthropic loop uses so OpenAI tool execution produces the
+            // same artifacts + memory side-effects.
+            toolCtx: ctx,
+            composioToolNames,
+            builtinTools,
+            maxIterations: 6,
           });
           accumulatedText = r.text;
           for (const tu of r.toolUses) toolCallsPersisted.push({ name: tu.name, args: tu.args });
+          for (const aid of r.artifactIds) artifactIds.push(aid);
           totalIn = r.inputTokens; totalOut = r.outputTokens;
           if (r.errored) emitter.emit("error", { source: "openai", message: r.errorMessage || "openai turn failed" });
           else emitter.emit("llm_call", { model: oaModel, inputTokens: totalIn, outputTokens: totalOut });
@@ -382,10 +390,16 @@ Do not skip the planning step even if the request seems simple.`,
               threadId,
               threadTitle: thread.title,
               input: content || "",
+              userId: user.id,
+              assistantMessageId: assistantMsg.id,
               send,
             });
             accumulatedText = r.text;
             for (const tu of r.toolUses) toolCallsPersisted.push({ name: tu.name, args: tu.args });
+            // P59 — artifacts created by the bridge (file changes, image
+            // outputs, long-form tool results) get attached to this turn
+            // so they show up in the canvas + library.
+            for (const aid of r.artifactIds) artifactIds.push(aid);
             // Codex billing follows the user's ChatGPT plan; we don't
             // count tokens here. Surface as a zero-cost LLM call so the
             // trace dashboard still has a row.

@@ -1,4 +1,4 @@
-// P58 — Per-provider chat-turn runners.
+// P58 + P59 — Per-provider chat-turn runners.
 //
 // The /api/chat route delegates to one of these based on the user's
 // provider mode. Each runner takes the same shape (system prompt +
@@ -12,12 +12,15 @@
 //   { type: "error", message }
 //
 // The Anthropic path stays in /api/chat/route.ts because it carries
-// HyperAgent-specific extras (cache_control, multi-turn tool loop, plan
-// mode, prompt cache stats). OpenAI + Codex are simpler one-shot paths.
+// HyperAgent-specific extras (cache_control, plan mode, prompt cache
+// stats). OpenAI now uses runOpenAILoop which DOES iterate tool calls
+// server-side with full agent semantics (P59).
 
-import { streamChat, type UnifiedMessage } from "./llm-providers";
+import type { UnifiedMessage } from "./llm-providers";
+import { runOpenAILoop } from "./openai-loop";
 import { runCodexTurn } from "./codex/chat-bridge";
 import type { CodexBridgeConfig } from "./codex/types";
+import type { ToolCtx } from "./tools";
 
 export interface DispatchSend {
   (event: any): void;
@@ -25,25 +28,29 @@ export interface DispatchSend {
 
 // ─── OpenAI runner ───────────────────────────────────────────────────
 //
-// Routes through streamChat() which already implements function-calling
-// over OpenAI Chat Completions SSE. Single iteration: we don't loop on
-// tool calls server-side (the Anthropic path does). Tool calls surface
-// as tool_use events; if the agent wanted to act on the result the user
-// has to send a follow-up message. That matches the OpenAI Chat
-// Completions usage pattern.
+// P59 — switched from single-pass streamChat to runOpenAILoop. Now does
+// real agent loop semantics: each iteration may call tools, server-side
+// executes them, appends `role: "tool"` messages, and re-calls until the
+// model returns a final answer (or hits the iteration cap).
 
 export interface OpenAITurnInput {
   userId: string;
-  modelId: string;            // e.g. "gpt-4o" or "gpt-4o-mini"
-  system: string;             // composed system prompt (no cache_control needed)
-  messages: UnifiedMessage[]; // full message history this turn
+  modelId: string;
+  system: string;
+  messages: UnifiedMessage[];
   tools: Array<{ name: string; description: string; input_schema: any }>;
+  // P59 — required for server-side tool execution.
+  toolCtx: ToolCtx;
+  composioToolNames: Set<string>;
+  builtinTools: any[];
   send: DispatchSend;
+  maxIterations?: number;
 }
 
 export interface TurnResult {
   text: string;
   toolUses: { name: string; args: any }[];
+  artifactIds: string[];
   inputTokens: number;
   outputTokens: number;
   errored: boolean;
@@ -51,41 +58,30 @@ export interface TurnResult {
 }
 
 export async function runOpenAITurn(input: OpenAITurnInput): Promise<TurnResult> {
-  let text = "";
-  const toolUses: { name: string; args: any }[] = [];
-  let inputTokens = 0, outputTokens = 0;
-  let errored = false;
-  let errorMessage: string | undefined;
-  try {
-    const r = await streamChat({
-      userId: input.userId,
-      modelId: input.modelId,
-      system: input.system,
-      messages: input.messages,
-      tools: input.tools,
-      cb: {
-        onText: delta => {
-          text += delta;
-          input.send({ type: "delta", text: delta });
-        },
-        onToolUse: tu => {
-          toolUses.push({ name: tu.name, args: tu.input });
-          input.send({ type: "tool_use", name: tu.name, args: tu.input });
-        },
-        onDone: info => {
-          inputTokens = info.inputTokens;
-          outputTokens = info.outputTokens;
-        },
-      },
-    });
-    inputTokens = r.inputTokens || inputTokens;
-    outputTokens = r.outputTokens || outputTokens;
-  } catch (e: any) {
-    errored = true;
-    errorMessage = e?.message || String(e);
-    input.send({ type: "error", message: errorMessage });
-  }
-  return { text, toolUses, inputTokens, outputTokens, errored, errorMessage };
+  // The loop handles its own error propagation + SSE emission.
+  const r = await runOpenAILoop({
+    userId: input.userId,
+    modelId: input.modelId,
+    system: input.system,
+    // The unified message shape only carries user/assistant; the loop
+    // re-shapes it into OpenAI's role enum.
+    messages: input.messages.filter(m => m.role !== "system") as Array<{ role: "user" | "assistant"; content: string }>,
+    tools: input.tools,
+    toolCtx: input.toolCtx,
+    composioToolNames: input.composioToolNames,
+    builtinTools: input.builtinTools,
+    send: input.send,
+    maxIterations: input.maxIterations ?? 6,
+  });
+  return {
+    text: r.text,
+    toolUses: r.toolUses.map(t => ({ name: t.name, args: t.args })),
+    artifactIds: r.artifactIds,
+    inputTokens: r.inputTokens,
+    outputTokens: r.outputTokens,
+    errored: r.errored,
+    errorMessage: r.errorMessage,
+  };
 }
 
 // ─── Codex runner ────────────────────────────────────────────────────
@@ -98,20 +94,33 @@ export interface CodexTurnInput {
   threadId: string;
   threadTitle?: string;
   input: string;
+  // P59 — required so artifact rows can carry a messageId pointing at
+  // the assistant message this turn writes into.
+  userId: string;
+  assistantMessageId: string;
   send: DispatchSend;
 }
 
-export async function runCodexChatTurn(args: CodexTurnInput): Promise<TurnResult> {
+export interface CodexTurnResult extends TurnResult {
+  // P59 — artifact ids the bridge produced (file changes, image outputs,
+  // long-form tool results promoted into the canvas).
+  artifactIds: string[];
+}
+
+export async function runCodexChatTurn(args: CodexTurnInput): Promise<CodexTurnResult> {
   const r = await runCodexTurn({
     bridge: args.bridge,
     threadId: args.threadId,
     threadTitle: args.threadTitle,
     input: args.input,
+    userId: args.userId,
+    assistantMessageId: args.assistantMessageId,
     send: args.send,
   });
   return {
     text: r.text,
     toolUses: r.toolUses.map(t => ({ name: t.name, args: t.args })),
+    artifactIds: r.artifactIds,
     // Codex doesn't surface token counts the same way; we leave 0/0 so
     // the cost helper records "unbilled by us" and the user's ChatGPT
     // plan tracks real usage.

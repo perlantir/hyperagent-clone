@@ -23,6 +23,24 @@ interface Msg {
   // approve/edit/reject controls under the assistant's plan summary.
   wasPlanFirst?: boolean;
   planResolved?: boolean;
+  // P59 — pending Codex approvals attached to this turn. Each item is a
+  // request that the bridge is waiting on; user clicks Accept / Decline
+  // / Cancel and the chat lambda forwards the decision via
+  // /api/codex/approval/[id].
+  approvals?: PendingApprovalCard[];
+}
+
+export interface PendingApprovalCard {
+  approvalId: string;
+  kind: string;             // command | file | network | tool
+  summary: string;
+  detail?: string;
+  command?: string;
+  path?: string;
+  diff?: string;
+  // resolved once the user picks a button or the server times out.
+  decision?: string;
+  timedOut?: boolean;
 }
 
 export function ChatView({ threadId, agentId }: { threadId: string; agentId: string | null }) {
@@ -165,6 +183,8 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
       let assistantText = "";
       const toolCalls: any[] = [];
       const artifactIds: string[] = [];
+      // P59 — accumulator for codex approvals on this turn.
+      const approvals: PendingApprovalCard[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -210,6 +230,36 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
               c[c.length - 1] = { ...c[c.length - 1], artifactIds: [...artifactIds], streaming: true };
               return c;
             });
+          } else if (ev.type === "approval") {
+            // P59 — Codex approval prompt. Push a new card; the bridge
+            // is paused until the user picks one of the buttons (or we
+            // time out server-side after 60s).
+            const card: PendingApprovalCard = {
+              approvalId: ev.approvalId,
+              kind: ev.kind,
+              summary: ev.summary,
+              detail: ev.detail,
+              command: ev.command,
+              path: ev.path,
+              diff: ev.diff,
+            };
+            approvals.push(card);
+            setMessages(m => {
+              const c = [...m];
+              c[c.length - 1] = { ...c[c.length - 1], approvals: [...approvals], streaming: true };
+              return c;
+            });
+          } else if (ev.type === "approval_resolved") {
+            // Mark the matching card as resolved so the buttons disable.
+            const idx = approvals.findIndex(a => a.approvalId === ev.approvalId);
+            if (idx >= 0) {
+              approvals[idx] = { ...approvals[idx], decision: ev.decision, timedOut: !!ev.timedOut };
+              setMessages(m => {
+                const c = [...m];
+                c[c.length - 1] = { ...c[c.length - 1], approvals: [...approvals], streaming: true };
+                return c;
+              });
+            }
           } else if (ev.type === "router") {
             setRouterNote(ev.reason);
           } else if (ev.type === "done") {
@@ -523,6 +573,10 @@ function MessageView({ m, onApprovePlan, onRejectPlan, onFork }: {
         {m.content && <div className={m.streaming ? "typing-cursor" : ""} style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>}
         {m.toolCalls?.map((tc, i) => <ToolCard key={i} tc={tc} />)}
         {m.artifactIds?.map(aid => <ArtifactRef key={aid} artifactId={aid} />)}
+        {/* P59 — Codex approval cards. Each pending card pauses the bridge
+            until the user picks a button. Decisions resolved via
+            /api/codex/approval/<id>. */}
+        {m.approvals?.map(a => <ApprovalCard key={a.approvalId} approval={a} />)}
         {/* P44 — Plan approval controls. Shown under a plan-first message
             until the user approves (sends 'go') or rejects. Edit is implicit:
             type a message to revise. */}
@@ -710,5 +764,119 @@ function PickerRow({ label, sub, active, fallback, onClick }: {
       </span>
       {active && <span style={{ color: "var(--accent)", fontSize: 12 }}>✓</span>}
     </button>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// P59 — Codex approval card.
+//
+// Renders inline in the assistant turn while the bridge is paused waiting
+// for the user's decision. Four buttons:
+//   Accept             — accept this one operation
+//   Accept for session — auto-accept further approvals of this kind for
+//                        the rest of the turn (no UI for subsequent ones)
+//   Decline            — reject this one operation (turn continues without it)
+//   Cancel             — abort the whole turn
+//
+// After a decision is sent, the buttons disable and a status badge
+// shows what the user picked. If the server-side timeout fires (60s
+// default) the badge shows "timed out → declined" so the user
+// understands what happened.
+
+function ApprovalCard({ approval }: { approval: PendingApprovalCard }) {
+  const [busy, setBusy] = useState(false);
+
+  async function send(decision: "accept" | "acceptForSession" | "decline" | "cancel") {
+    if (approval.decision || busy) return;
+    setBusy(true);
+    try {
+      await fetch(`/api/codex/approval/${encodeURIComponent(approval.approvalId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ decision }),
+      });
+    } catch {
+      // On error, leave the card open — the server will eventually time
+      // out and decline server-side, which is the safe default.
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const resolved = !!approval.decision;
+  const kindLabel = approval.kind === "command" ? "Run command"
+    : approval.kind === "file" ? "Edit file"
+    : approval.kind === "network" ? "Network request"
+    : approval.kind === "tool" ? "Use tool"
+    : approval.kind;
+
+  // Accent color signals the kind so cards are scannable at a glance.
+  const accent =
+    approval.kind === "command" ? "#dc2626"
+    : approval.kind === "file" ? "#0891b2"
+    : approval.kind === "network" ? "#ca8a04"
+    : "#6d28d9";
+
+  return (
+    <div style={{
+      marginTop: 12, padding: 14, borderRadius: 10,
+      background: `${accent}10`,
+      border: `1px solid ${accent}55`,
+      display: "flex", flexDirection: "column", gap: 10,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{
+          fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 4,
+          background: `${accent}25`, color: accent, letterSpacing: 0.5,
+        }}>{kindLabel.toUpperCase()}</span>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>
+          {approval.summary}
+        </div>
+      </div>
+      {(approval.command || approval.path) && (
+        <div style={{
+          fontFamily: "JetBrains Mono, monospace", fontSize: 11.5,
+          background: "var(--bg-subtle)", padding: "8px 10px", borderRadius: 6,
+          color: "var(--text-muted)", whiteSpace: "pre-wrap", overflow: "auto", maxHeight: 160,
+        }}>
+          {approval.command || approval.path}
+        </div>
+      )}
+      {approval.diff && (
+        <details style={{ fontSize: 11 }}>
+          <summary style={{ cursor: "pointer", color: "var(--text-muted)" }}>Diff</summary>
+          <pre style={{
+            fontFamily: "JetBrains Mono, monospace", fontSize: 11,
+            background: "var(--bg-subtle)", padding: 10, borderRadius: 6,
+            margin: "6px 0 0", maxHeight: 240, overflow: "auto",
+          }}>{approval.diff}</pre>
+        </details>
+      )}
+      {approval.detail && !approval.command && !approval.path && (
+        <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.5 }}>
+          {approval.detail}
+        </div>
+      )}
+      {!resolved ? (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={() => send("accept")} disabled={busy} className="btn btn-primary"
+            style={{ fontSize: 12, padding: "5px 12px" }}>Accept</button>
+          <button onClick={() => send("acceptForSession")} disabled={busy} className="btn"
+            style={{ fontSize: 12, padding: "5px 12px" }}>Accept for session</button>
+          <button onClick={() => send("decline")} disabled={busy} className="btn"
+            style={{ fontSize: 12, padding: "5px 12px" }}>Decline</button>
+          <button onClick={() => send("cancel")} disabled={busy} className="btn"
+            style={{ fontSize: 12, padding: "5px 12px", color: "#dc2626" }}>Cancel turn</button>
+        </div>
+      ) : (
+        <div style={{
+          fontSize: 11.5, fontWeight: 600, color: accent,
+          padding: "5px 10px", background: `${accent}20`, borderRadius: 6,
+          alignSelf: "flex-start",
+        }}>
+          {approval.timedOut ? "TIMED OUT — DECLINED" : `${approval.decision?.toUpperCase()}`}
+        </div>
+      )}
+    </div>
   );
 }

@@ -19,7 +19,9 @@
     "test:codex-app-server": "npx tsx src/lib/__tests__/codex-app-server.test.ts",
     "test:codex-chat-bridge": "npx tsx src/lib/__tests__/codex-chat-bridge.test.ts",
     "test:codex-chat-dispatch": "npx tsx src/lib/__tests__/codex-chat-dispatch.test.ts",
-    "test:codex": "npm run test:codex-redact && npm run test:codex-provider-mode && npm run test:codex-app-server && npm run test:codex-chat-bridge && npm run test:codex-chat-dispatch",
+    "test:codex-approvals": "npx tsx src/lib/__tests__/codex-approvals.test.ts",
+    "test:openai-loop": "npx tsx src/lib/__tests__/openai-loop.test.ts",
+    "test:codex": "npm run test:codex-redact && npm run test:codex-provider-mode && npm run test:codex-app-server && npm run test:codex-chat-bridge && npm run test:codex-chat-dispatch && npm run test:codex-approvals && npm run test:openai-loop",
     "test:all": "npm run test:prompt && npm run test:providers && npm run test:working-memory && npm run test:embeddings && npm run test:rubric && npm run test:security && npm run test:sandbox-policy && npm run test:codex"
   },
   "dependencies": {
