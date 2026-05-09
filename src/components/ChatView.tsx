@@ -4,6 +4,7 @@ import { useRouter as useNextRouter } from "next/navigation";
 import { SaveMemoryButton } from "@/components/SaveMemoryButton";
 import { useToast } from "@/components/Toast";
 import { AddMenu, RunModeMenu, type RunMode } from "@/components/ComposerMenu";
+import { MODELS, modelsByProvider, getModel } from "@/lib/models";
 
 interface Attachment {
   kind: "image" | "file";
@@ -33,6 +34,19 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
   const [routerNote, setRouterNote] = useState<string | null>(null);
   const [agents, setAgents] = useState<any[]>([]);
   const [useRouter, setUseRouter] = useState(false);
+  // P55 — per-thread model override. Persisted to localStorage so reopening
+  // the thread keeps your selection. "" means "use the agent / account default".
+  const [modelOverride, setModelOverride] = useState<string>("");
+  useEffect(() => {
+    try {
+      const v = localStorage.getItem(`chat-model:${threadId}`);
+      if (v !== null) setModelOverride(v);
+    } catch {}
+  }, [threadId]);
+  function pickModel(id: string) {
+    setModelOverride(id);
+    try { localStorage.setItem(`chat-model:${threadId}`, id); } catch {}
+  }
   // P31 — pending attachments staged on the composer.
   const [pending, setPending] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -141,6 +155,7 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
           threadId, content: text, useRouter: useRouter && !agentId,
           attachments: attachmentsForSend.length > 0 ? attachmentsForSend : undefined,
           runMode,
+          modelId: modelOverride || undefined,
         }),
       });
       if (!r.ok || !r.body) throw new Error("Chat request failed");
@@ -295,6 +310,12 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
           Drop files here — images attach to your message; other types become artifacts.
         </div>
       )}
+      {/* P55 — Model picker pill, upper-right of the chat. Per-thread, persisted
+          in localStorage. "Default" = use the agent/account model. Selecting a
+          non-Anthropic model shows a hint badge since the chat tool-loop falls
+          back to the default for those (see chat/route.ts P54 guard). */}
+      <ChatModelPicker selected={modelOverride} onChange={pickModel} />
+
       <div ref={messagesRef} style={{ flex: 1, overflowY: "auto", padding: "32px 32px 8px" }}>
         <div style={{ maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24 }}>
           {messages.length === 0 && (
@@ -589,5 +610,105 @@ function ArtifactRef({ artifactId }: { artifactId: string }) {
         <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>Open ↗</span>
       </div>
     </a>
+  );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// P55 — Chat model picker (upper-right floating pill).
+//
+// Per-thread, localStorage-persisted. Selecting a non-Anthropic model shows
+// a "via fallback" badge because the chat tool-loop currently always uses
+// Claude for tool calling — non-Claude selections silently fall back via the
+// chat/route.ts guard. The picker still lets the user express intent for
+// the moment when full multi-provider chat lands.
+function ChatModelPicker({ selected, onChange }: {
+  selected: string;
+  onChange: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as any)) setOpen(false);
+    };
+    document.addEventListener("click", onDoc);
+    return () => document.removeEventListener("click", onDoc);
+  }, [open]);
+  const groups = modelsByProvider();
+  const current = selected ? getModel(selected) : null;
+  const isFallback = current ? current.provider !== "anthropic" : false;
+  return (
+    <div ref={ref} style={{
+      position: "absolute", top: 12, right: 16, zIndex: 30,
+    }}>
+      <button onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
+        style={{
+          display: "flex", alignItems: "center", gap: 6,
+          padding: "5px 11px", borderRadius: 999,
+          border: "1px solid var(--border)",
+          background: "var(--bg-elev)", color: "var(--text-muted)",
+          fontSize: 11.5, fontWeight: 500, cursor: "pointer",
+        }}>
+        <span style={{ width: 6, height: 6, borderRadius: 99,
+          background: isFallback ? "#f59e0b" : "var(--green)" }} />
+        <span>{current ? current.label : "Default model"}</span>
+        <span style={{ fontSize: 9, opacity: 0.5 }}>▾</span>
+      </button>
+      {open && (
+        <div style={{
+          position: "absolute", top: "calc(100% + 4px)", right: 0,
+          width: 260, maxHeight: 380, overflowY: "auto",
+          background: "var(--bg)", border: "1px solid var(--border)",
+          borderRadius: 10, boxShadow: "0 10px 40px rgba(0,0,0,0.18)",
+          padding: 4,
+        }}>
+          <PickerRow label="Default" sub="Agent / account default"
+            active={!selected} onClick={() => { onChange(""); setOpen(false); }} />
+          <div style={{ height: 1, background: "var(--border)", margin: "4px 0" }} />
+          {(["anthropic", "openai", "google"] as const).map(p => (
+            <div key={p}>
+              <div style={{ fontSize: 10, fontWeight: 700, letterSpacing: 0.6,
+                color: "var(--text-faint)", textTransform: "uppercase",
+                padding: "8px 10px 4px" }}>{p}</div>
+              {groups[p].map(m => (
+                <PickerRow key={m.id} label={m.label}
+                  sub={`${(m.contextWindow / 1000).toFixed(0)}k ctx · $${m.inputPer1k}/$${m.outputPer1k} per 1k`}
+                  active={selected === m.id}
+                  fallback={p !== "anthropic"}
+                  onClick={() => { onChange(m.id); setOpen(false); }} />
+              ))}
+            </div>
+          ))}
+          <div style={{ padding: "8px 10px", fontSize: 10.5, color: "var(--text-faint)", lineHeight: 1.4, borderTop: "1px solid var(--border)" }}>
+            Non-Claude selections need a key in <a href="/settings#api-keys" style={{ color: "var(--accent)" }} target="_blank" rel="noreferrer">Settings</a>. Tool-loop currently uses Claude internally.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PickerRow({ label, sub, active, fallback, onClick }: {
+  label: string; sub: string; active: boolean; fallback?: boolean; onClick: () => void;
+}) {
+  return (
+    <button onClick={onClick} style={{
+      display: "flex", alignItems: "center", gap: 8, width: "100%",
+      padding: "7px 10px", borderRadius: 6,
+      border: active ? "1px solid var(--accent)" : "1px solid transparent",
+      background: active ? "var(--accent-bg)" : "transparent",
+      color: "var(--text)", fontSize: 12, textAlign: "left", cursor: "pointer",
+    }} onMouseEnter={e => { if (!active) e.currentTarget.style.background = "var(--bg-subtle)"; }}
+       onMouseLeave={e => { if (!active) e.currentTarget.style.background = "transparent"; }}>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 500, display: "flex", alignItems: "center", gap: 6 }}>
+          {label}
+          {fallback && <span style={{ fontSize: 9, color: "#f59e0b", fontWeight: 700, letterSpacing: 0.4 }}>FALLBACK</span>}
+        </div>
+        <div style={{ fontSize: 10.5, color: "var(--text-faint)", marginTop: 1 }}>{sub}</div>
+      </span>
+      {active && <span style={{ color: "var(--accent)", fontSize: 12 }}>✓</span>}
+    </button>
   );
 }

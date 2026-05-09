@@ -43,7 +43,7 @@ export const runtime = "nodejs";
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const { threadId, content, useRouter, attachments, runMode } = await req.json().catch(() => ({}));
+  const { threadId, content, useRouter, attachments, runMode, modelId: bodyModelId } = await req.json().catch(() => ({}));
   // P38 — runMode controls how this turn is executed.
   //   "execute" (default): run normally.
   //   "plan_first": prepend a planning instruction to the system prompt so
@@ -381,9 +381,12 @@ Do not skip the planning step even if the request seems simple.`,
           // the broader picker fall back to DEFAULT_MODEL with a console
           // warning rather than failing in a confusing way. The future
           // multi-provider chat path goes through llm-providers.streamChat.
-          let effectiveModel: string = (agent as any)?.modelId || DEFAULT_MODEL;
+          // P55 — per-turn model override from the chat composer. The user
+          // can switch models from the picker upper-right; that selection
+          // arrives in the body as modelId and beats agent.modelId.
+          let effectiveModel: string = bodyModelId || (agent as any)?.modelId || DEFAULT_MODEL;
           if (effectiveModel && !effectiveModel.startsWith("claude-")) {
-            console.warn(`[chat] agent.modelId=${effectiveModel} is non-Anthropic; falling back to ${DEFAULT_MODEL} for the chat tool-loop`);
+            console.warn(`[chat] modelId=${effectiveModel} is non-Anthropic; falling back to ${DEFAULT_MODEL} for the chat tool-loop`);
             effectiveModel = DEFAULT_MODEL;
           }
           const stream2 = ant.messages.stream({
