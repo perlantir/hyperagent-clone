@@ -5,6 +5,7 @@ import { SaveMemoryButton } from "@/components/SaveMemoryButton";
 import { useToast } from "@/components/Toast";
 import { AddMenu, RunModeMenu, type RunMode } from "@/components/ComposerMenu";
 import { MODELS, modelsByProvider, getModel } from "@/lib/models";
+import { startCompanionTurn, type CompanionTurnHandle } from "@/lib/codex/companion-client";
 
 interface Attachment {
   kind: "image" | "file";
@@ -75,10 +76,17 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
   // Track the last completed assistant runId so the "Run evaluation" /
   // "Give feedback" actions in RunModeMenu have a target.
   const [lastRunId, setLastRunId] = useState<string | null>(null);
+  // P65.1 — current provider mode for banner display. Re-fetched at
+  // mount + send() time so it always reflects the user's latest choice.
+  const [activeProviderMode, setActiveProviderMode] = useState<string>("anthropicApiKey");
   // P43 — track the in-flight runId so the Stop button can hit
   // /api/runs/[id]/cancel and short-circuit the loop between iterations.
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // P65.1 — When the user is in codexChatGPTCompanion mode, the active
+  // companion turn handle owns its own WebSocket. Stop button / cleanup
+  // talks to it through this ref.
+  const companionRef = useRef<CompanionTurnHandle | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -89,6 +97,14 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
 
   useEffect(() => { reload(); }, [reload]);
   useEffect(() => { fetch("/api/agents").then(r => r.json()).then(j => setAgents(j.agents || [])); }, []);
+  // P65.1 — load provider mode once at mount so the banner renders
+  // immediately and reflects what would happen on next send().
+  useEffect(() => {
+    fetch("/api/codex/provider-mode")
+      .then(r => r.json())
+      .then(j => setActiveProviderMode(j?.mode || "anthropicApiKey"))
+      .catch(() => undefined);
+  }, []);
   useEffect(() => {
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -187,6 +203,54 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
     // (server-side cooperative cancel between iterations).
     abortRef.current = new AbortController();
     setActiveRunId(null);
+
+    // P65.1 — provider-mode dispatch. When the user has chosen
+    // codexChatGPTCompanion, we don't go through the hosted /api/chat
+    // path at all — the run is driven directly browser→companion→codex.
+    // The hosted server still creates the user message + persists
+    // mirrored events, but the LLM call itself never reaches Vercel.
+    let providerMode = activeProviderMode;
+    let pairSessionId: string | null = null;
+    try {
+      const m = await fetch("/api/codex/provider-mode").then(r => r.json());
+      providerMode = m?.mode || "anthropicApiKey";
+      setActiveProviderMode(providerMode);
+    } catch {}
+    if (providerMode === "codexChatGPTCompanion") {
+      try {
+        pairSessionId = typeof window !== "undefined"
+          ? localStorage.getItem("codex-companion:sessionId")
+          : null;
+      } catch {}
+      if (!pairSessionId) {
+        setMessages(m => {
+          const c = [...m];
+          c[c.length - 1] = {
+            ...c[c.length - 1],
+            content: "Codex Companion mode is selected, but no companion is paired yet. Open Settings → Codex to install and pair the companion.",
+            streaming: false,
+          };
+          return c;
+        });
+        setStreaming(false);
+        return;
+      }
+      // Persist the user message via the existing thread API so
+      // server-side trace + multi-tab consistency stay intact. The
+      // /api/chat call would also do this, but the companion path
+      // bypasses /api/chat entirely.
+      try {
+        await fetch(`/api/threads/${threadId}/messages`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: "user", content: text }),
+        });
+      } catch {
+        // Non-fatal. Best-effort persistence; the run still proceeds.
+      }
+      await sendThroughCompanion({ text, pairSessionId });
+      return;
+    }
 
     try {
       const r = await fetch("/api/chat", {
@@ -325,12 +389,176 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
   // P43 — Stop the in-flight turn. Aborts the client-side SSE stream and
   // fires a cooperative cancel on the server (chat loop checks
   // isRunCancelled between iterations and exits cleanly).
+  //
+  // P65.1 — When the active turn is going through the companion path,
+  // we ALSO close the companion WS handle so the local codex run is
+  // interrupted (best-effort: codex's `turn/interrupt` is sent first).
   async function stop() {
     abortRef.current?.abort();
+    if (companionRef.current) {
+      try { companionRef.current.cancel(); } catch {}
+      // Closing the WS shortly after cancel ensures we don't keep
+      // streaming events into an aborted UI. The companion mirror
+      // batch is drained server-side via the run-ticket-bound queue.
+      setTimeout(() => {
+        try { companionRef.current?.close(); } catch {}
+        companionRef.current = null;
+      }, 200);
+    }
     if (activeRunId) {
       try { await fetch(`/api/runs/${activeRunId}/cancel`, { method: "POST" }); }
       catch (e) { /* best effort */ }
     }
+  }
+
+  // ─── P65.1 — Companion run dispatch ─────────────────────────────
+  //
+  // Branch taken when providerMode === codexChatGPTCompanion. Wraps
+  // startCompanionTurn() and translates its event stream into the
+  // existing ChatView event shape so tool/use, deltas, approvals and
+  // run completion all render identically to the hosted path.
+  //
+  // Approval flow: the companion surfaces approval_required with a
+  // synthesized approvalId. We append a PendingApprovalCard to the
+  // current assistant message so the existing approval UI fires the
+  // user's decision back via approveCompanion()/declineCompanion().
+  // The companion-client sends the JSON-RPC response back to codex.
+  //
+  // Cancellation: companionRef is wired so the Stop button works the
+  // same as the hosted path.
+  async function sendThroughCompanion({
+    text,
+    pairSessionId,
+  }: { text: string; pairSessionId: string }) {
+    let assistantText = "";
+    const approvals: PendingApprovalCard[] = [];
+    const toolCalls: any[] = [];
+    let handle: CompanionTurnHandle | null = null;
+    try {
+      handle = await startCompanionTurn({
+        threadId,
+        agentId: agentId ?? null,
+        pairSessionId,
+        text,
+        onEvent: (ev) => {
+          if (ev.type === "started") {
+            setActiveRunId(ev.runId);
+          } else if (ev.type === "delta") {
+            assistantText += ev.text;
+            setMessages((m) => {
+              const c = [...m];
+              c[c.length - 1] = { ...c[c.length - 1], content: assistantText, streaming: true };
+              return c;
+            });
+          } else if (ev.type === "tool_use") {
+            toolCalls.push({ id: ev.id, name: ev.name, args: ev.input });
+            setMessages((m) => {
+              const c = [...m];
+              c[c.length - 1] = { ...c[c.length - 1], toolCalls: [...toolCalls], streaming: true };
+              return c;
+            });
+          } else if (ev.type === "tool_result") {
+            // Decorate the matching toolCall with its result if we
+            // have an id; otherwise drop into the array as-is.
+            for (const tc of toolCalls) if (tc.id === ev.id) tc.result = ev.output;
+            setMessages((m) => {
+              const c = [...m];
+              c[c.length - 1] = { ...c[c.length - 1], toolCalls: [...toolCalls], streaming: true };
+              return c;
+            });
+          } else if (ev.type === "approval_required") {
+            const card: PendingApprovalCard = {
+              approvalId: ev.approvalId,
+              kind: methodToKind(ev.method),
+              summary: ev.summary,
+              detail: ev.detail,
+              command: ev.params?.command,
+              path: ev.params?.path || ev.params?.file_path,
+              diff: ev.params?.diff || ev.params?.unified_diff,
+            };
+            approvals.push(card);
+            setMessages((m) => {
+              const c = [...m];
+              c[c.length - 1] = { ...c[c.length - 1], approvals: [...approvals], streaming: true };
+              return c;
+            });
+          } else if (ev.type === "turn_finished") {
+            // Codex emits one turn/completed; we treat that as the
+            // hosted-path "done" event for the current message.
+            setMessages((m) => {
+              const c = [...m];
+              c[c.length - 1] = { ...c[c.length - 1], streaming: false, runId: handle?.runId };
+              return c;
+            });
+            if (handle?.runId) setLastRunId(handle.runId);
+          } else if (ev.type === "error") {
+            setMessages((m) => {
+              const c = [...m];
+              c[c.length - 1] = {
+                ...c[c.length - 1],
+                content: assistantText + (assistantText ? "\n\n" : "") + "[error: " + ev.message + "]",
+                streaming: false,
+              };
+              return c;
+            });
+          } else if (ev.type === "done") {
+            setMessages((m) => {
+              const c = [...m];
+              c[c.length - 1] = { ...c[c.length - 1], streaming: false };
+              return c;
+            });
+          }
+          // codex_event, thread_started, turn_started are forwarded
+          // for trace completeness but not rendered directly.
+        },
+      });
+      companionRef.current = handle;
+      await handle.done;
+    } catch (e: any) {
+      const reason = e?.reason ? ` (${e.reason})` : "";
+      setMessages((m) => {
+        const c = [...m];
+        c[c.length - 1] = {
+          ...c[c.length - 1],
+          content: "Codex Companion error: " + (e?.message || String(e)) + reason,
+          streaming: false,
+        };
+        return c;
+      });
+    } finally {
+      try { await reload(); } catch {}
+      setStreaming(false);
+      setActiveRunId(null);
+      companionRef.current = null;
+    }
+  }
+
+  // P65.1 — companion-mode approval handler. ChatView already passes
+  // approveCompanion()/declineCompanion() into the approval card UI
+  // when message.runId looks like a companion run; the card fires
+  // these to push the JSON-RPC response back through the WS.
+  function approveCompanion(approvalId: string, decision: "accept" | "acceptForSession" | "decline" | "cancel") {
+    const handle = companionRef.current;
+    if (!handle) return;
+    handle.approval(approvalId, decision);
+    setMessages((m) => {
+      const c = [...m];
+      const last = c[c.length - 1];
+      if (!last?.approvals) return c;
+      const updated = last.approvals.map((a) =>
+        a.approvalId === approvalId ? { ...a, decision } : a,
+      );
+      c[c.length - 1] = { ...last, approvals: updated };
+      return c;
+    });
+  }
+
+  // Helper used by approval-card rendering.
+  function methodToKind(method: string): string {
+    if (method === "applyPatchApproval" || method === "item/fileChange/requestApproval") return "file";
+    if (method === "execCommandApproval" || method === "item/commandExecution/requestApproval") return "command";
+    if (method === "item/permissions/requestApproval") return "network";
+    return "tool";
   }
 
   // P44 — Plan approval. After a plan-first turn lands, the user can
@@ -389,6 +617,25 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
           back to the default for those (see chat/route.ts P54 guard). */}
       <ChatModelPicker selected={modelOverride} onChange={pickModel} />
 
+      {/* P65.1 — Experimental banner for codexChatGPTCompanion. We always
+          show this when the user has selected companion mode so they
+          understand that the run is browser-driven and tab-bound. */}
+      {activeProviderMode === "codexChatGPTCompanion" && (
+        <div style={{
+          margin: "12px 32px 0",
+          padding: "10px 14px",
+          background: "color-mix(in srgb, var(--accent) 10%, transparent)",
+          border: "1px solid color-mix(in srgb, var(--accent) 40%, transparent)",
+          borderRadius: 10,
+          fontSize: 12,
+          color: "var(--text-muted)",
+          lineHeight: 1.55,
+        }}>
+          <strong style={{ color: "var(--text)" }}>Experimental.</strong>{" "}
+          This run is being executed through your local Codex companion. Closing this browser tab may stop or abandon the run.
+        </div>
+      )}
+
       <div ref={messagesRef} style={{ flex: 1, overflowY: "auto", padding: "32px 32px 8px" }}>
         <div style={{ maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24 }}>
           {messages.length === 0 && (
@@ -420,6 +667,16 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
               onApprovePlan={() => approvePlan(i)}
               onRejectPlan={() => rejectPlan(i)}
               onFork={m.id ? () => forkFromMessage(m.id!) : undefined}
+              // P65.1 — when this is the streaming assistant message and
+              // we're in companion mode, route approval clicks through
+              // the WS rather than the hosted /api/codex/approval/[id]
+              // endpoint. The synthesized companion approvalIds aren't
+              // stored on the server, so the hosted endpoint would 404.
+              onApprovalDecision={
+                activeProviderMode === "codexChatGPTCompanion" && m.streaming
+                  ? approveCompanion
+                  : undefined
+              }
             />
           ))}
         </div>
@@ -538,11 +795,14 @@ function AttachmentPill({ a, onRemove }: { a: Attachment; onRemove: () => void }
   );
 }
 
-function MessageView({ m, onApprovePlan, onRejectPlan, onFork }: {
+function MessageView({ m, onApprovePlan, onRejectPlan, onFork, onApprovalDecision }: {
   m: Msg;
   onApprovePlan?: () => void;
   onRejectPlan?: () => void;
   onFork?: () => void;
+  // P65.1 — companion-mode approvals are routed through this callback
+  // (WS push to local companion) instead of the hosted REST endpoint.
+  onApprovalDecision?: (approvalId: string, decision: "accept" | "acceptForSession" | "decline" | "cancel") => void;
 }) {
   if (m.role === "user") {
     return (
@@ -599,7 +859,7 @@ function MessageView({ m, onApprovePlan, onRejectPlan, onFork }: {
         {/* P59 — Codex approval cards. Each pending card pauses the bridge
             until the user picks a button. Decisions resolved via
             /api/codex/approval/<id>. */}
-        {m.approvals?.map(a => <ApprovalCard key={a.approvalId} approval={a} />)}
+        {m.approvals?.map(a => <ApprovalCard key={a.approvalId} approval={a} onDecide={onApprovalDecision} />)}
         {/* P44 — Plan approval controls. Shown under a plan-first message
             until the user approves (sends 'go') or rejects. Edit is implicit:
             type a message to revise. */}
@@ -806,18 +1066,30 @@ function PickerRow({ label, sub, active, fallback, onClick }: {
 // default) the badge shows "timed out → declined" so the user
 // understands what happened.
 
-function ApprovalCard({ approval }: { approval: PendingApprovalCard }) {
+function ApprovalCard({ approval, onDecide }: {
+  approval: PendingApprovalCard;
+  // P65.1 — Companion mode passes a callback that pushes the decision
+  // to the local companion via WS. When undefined, we fall back to the
+  // hosted REST endpoint used by Bridge / Local modes.
+  onDecide?: (approvalId: string, decision: "accept" | "acceptForSession" | "decline" | "cancel") => void;
+}) {
   const [busy, setBusy] = useState(false);
 
   async function send(decision: "accept" | "acceptForSession" | "decline" | "cancel") {
     if (approval.decision || busy) return;
     setBusy(true);
     try {
-      await fetch(`/api/codex/approval/${encodeURIComponent(approval.approvalId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision }),
-      });
+      if (onDecide) {
+        // Companion path — synchronous callback into ChatView.
+        onDecide(approval.approvalId, decision);
+      } else {
+        // Bridge / Local path — hosted REST.
+        await fetch(`/api/codex/approval/${encodeURIComponent(approval.approvalId)}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ decision }),
+        });
+      }
     } catch {
       // On error, leave the card open — the server will eventually time
       // out and decline server-side, which is the safe default.

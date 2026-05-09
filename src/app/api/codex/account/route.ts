@@ -54,12 +54,24 @@ export async function GET() {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   try {
-    const acct = await withClient(user.id, c => c.accountRead());
-    // Strip accountId before returning to the client. We keep authMode +
-    // email + plan because those are already visible to the user in
-    // their ChatGPT account settings.
-    const { accountId: _drop, ...safe } = acct as any;
-    return NextResponse.json({ account: safe });
+    // P64.2 — real protocol shape is { account: Account | null,
+    // requiresOpenaiAuth: boolean }. We surface email + planType only
+    // when type==="chatgpt"; api-key sessions and bedrock sessions
+    // expose nothing beyond the type.
+    const acct = await withClient(user.id, c => c.accountRead({ refreshToken: false }));
+    const account = (acct?.account as any) || null;
+    const safeAccount = account
+      ? {
+          type: account.type,
+          ...(account.type === "chatgpt"
+            ? { email: account.email, planType: account.planType }
+            : {}),
+        }
+      : null;
+    return NextResponse.json({
+      account: safeAccount,
+      requiresOpenaiAuth: !!acct?.requiresOpenaiAuth,
+    });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "account/read failed" }, { status: 502 });
   }

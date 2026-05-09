@@ -1,0 +1,18 @@
+{
+  "name": "hyperagent-codex-relay",
+  "version": "0.1.0-alpha.0",
+  "description": "Hosted relay/control-plane for Hyperagent Codex Companion mode. Long-lived bidirectional WebSocket between hosted Vercel app and the user's local companion. Experimental alpha.",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "src/server.js",
+  "bin": { "hyperagent-codex-relay": "src/server.js" },
+  "engines": { "node": ">=18.17.0" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

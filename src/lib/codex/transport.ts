@@ -27,20 +27,53 @@ export interface Transport {
 
 // ─── WebSocket transport ─────────────────────────────────────────────
 //
-// We deliberately use the platform's WebSocket (Node 18+ / browser) so
-// the same code runs from a serverless route or a Node background
-// worker. Authentication is done via the Sec-WebSocket-Protocol header
-// because that's the cleanest path through edge proxies; capability
-// tokens go through the subprotocol slot rather than Authorization.
+// P64.2 — Real-binary smoke testing against codex 0.130.0 revealed
+// the following:
 //
-// SECURITY: We refuse to connect to ws:// for non-loopback hosts and
-// require wss:// otherwise.
+//   - The codex app-server expects the capability token via the
+//     Authorization: Bearer <TOKEN> request header. Subprotocol-based
+//     auth (Sec-WebSocket-Protocol: codex-bridge.bearer.<TOKEN>) and
+//     query-string auth (?token=, ?access_token=) are both rejected
+//     with HTTP 401 at the WS handshake.
+//
+//   - The framing accepted by codex over WS is BOTH newline-delimited
+//     AND message-per-frame. We continue to send newline-terminated
+//     frames so the same envelope-builder works for stdio + WS.
+//
+//   - When the listener is started without `--ws-auth`, loopback
+//     bindings accept unauthenticated clients. This is INSECURE on a
+//     shared machine — any other process (or any other browser tab via
+//     localhost-cors-bypass) can drive the bridge. We therefore always
+//     require a capability token in the bridge config and always send
+//     it via Authorization header for server-side dispatch.
+//
+//   - Browsers cannot set arbitrary headers on WebSocket connections.
+//     This means the BROWSER cannot directly authenticate to a
+//     `--ws-auth capability-token` codex bridge. Browser-direct
+//     dispatch can therefore ONLY connect to an unauthenticated
+//     loopback codex (insecure) — the documented path for hosted
+//     deployments is the companion proxy (P65) that translates a
+//     browser-friendly auth scheme into the Authorization header
+//     codex requires.
+//
+// Server-side connections in this file go through the `ws` npm
+// package (which supports custom request headers). When called from a
+// browser bundle, we fall back to the platform WebSocket but refuse to
+// attach the capability token — the caller has already been informed
+// that a companion is required.
 
 export interface WebSocketTransportOptions {
   url: string;
   capabilityToken: string;
   // Allow callers to pass a custom WebSocket impl for tests.
   webSocketImpl?: any;
+  // P64.2 — Pre-resolved IP address (and family). When supplied, the
+  // server-side path will pin the underlying TCP connection to this
+  // exact address via a custom `lookup` function — eliminating the
+  // DNS-rebinding TOCTOU window between url-safety's verifyResolvedIp
+  // call and the WebSocket library's own DNS lookup at connect time.
+  preResolvedAddress?: string;
+  preResolvedFamily?: 4 | 6;
 }
 
 export async function createWebSocketTransport(opts: WebSocketTransportOptions): Promise<Transport> {
@@ -55,32 +88,71 @@ export async function createWebSocketTransport(opts: WebSocketTransportOptions):
     throw new Error(`Unsupported transport protocol: ${url.protocol}`);
   }
 
-  const WebSocketImpl: any = opts.webSocketImpl
-    || (typeof WebSocket !== "undefined" ? WebSocket : null);
-  if (!WebSocketImpl) {
-    throw new Error("No WebSocket implementation available in this runtime");
-  }
+  const isBrowser = typeof window !== "undefined" && typeof (globalThis as any).document !== "undefined";
 
-  // Use the standard subprotocol slot to carry the capability token.
-  // bridges that follow this convention parse it as `bearer.<token>`.
-  const subProtocol = `codex-bridge.bearer.${opts.capabilityToken}`;
-  const ws = new WebSocketImpl(opts.url, [subProtocol]);
+  // Pick implementation. Server-side (Node) path uses the `ws` package
+  // because the platform `WebSocket` in older Node versions cannot set
+  // headers, and even when it can the API surface differs. The browser
+  // path uses the platform implementation.
+  let wsAny: any;
+  let serverSidePath = false;
+  if (opts.webSocketImpl) {
+    wsAny = await constructWithImpl(opts.webSocketImpl, url, opts);
+    // Treat custom impls as server-side capable so tests can exercise
+    // the auth-header path without pulling `ws` into a browser bundle.
+    serverSidePath = true;
+  } else if (!isBrowser) {
+    serverSidePath = true;
+    let WsImpl: any;
+    try {
+      // Dynamic import keeps `ws` out of the browser bundle. Suppress
+      // module ordering quirks under tsx by going through eval-like
+      // dynamic resolution.
+      const mod = await import("ws");
+      WsImpl = (mod as any).default || (mod as any).WebSocket || mod;
+    } catch (e: any) {
+      throw new Error(
+        `Server-side WebSocket support requires the \`ws\` package. Install it with \`npm i ws\`. Underlying error: ${e?.message || "unknown"}`,
+      );
+    }
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${opts.capabilityToken}`,
+    };
+    const wsOpts: any = { headers };
+    if (opts.preResolvedAddress) {
+      // Pin the TCP connect to the IP we already validated. The `ws`
+      // package forwards `lookup` to net.connect / tls.connect.
+      const family: 4 | 6 = opts.preResolvedFamily || 4;
+      wsOpts.lookup = (
+        _hostname: string,
+        _options: any,
+        callback: (err: NodeJS.ErrnoException | null, address: string, family: number) => void,
+      ) => callback(null, opts.preResolvedAddress!, family);
+    }
+    wsAny = new WsImpl(opts.url, wsOpts);
+  } else {
+    // Browser path — platform WebSocket, no headers possible.
+    if (typeof WebSocket === "undefined") {
+      throw new Error("No WebSocket implementation available in this runtime");
+    }
+    // We deliberately DO NOT attach the capability token here. The
+    // codex app-server requires it via Authorization header which is
+    // unreachable from the browser. Use the companion proxy (P65) for
+    // browser-driven dispatch against a `--ws-auth`-protected codex.
+    wsAny = new WebSocket(opts.url);
+  }
 
   const messageHandlers: ((env: any) => void)[] = [];
   const closeHandlers: ((err?: Error) => void)[] = [];
   let buffer = "";
   let closed = false;
 
-  await new Promise<void>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error("Codex bridge connection timed out")), 8000);
-    ws.onopen = () => { clearTimeout(t); resolve(); };
-    ws.onerror = (e: any) => { clearTimeout(t); reject(new Error(`Codex bridge connection error: ${e?.message || "unknown"}`)); };
-  });
+  await waitForOpen(wsAny);
 
-  ws.onmessage = (ev: any) => {
-    const data = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
+  attachMessageHandler(wsAny, (data: string) => {
     buffer += data;
-    // Frame on newlines.
+    // Frame on newlines. Codex accepts both newline-delimited and
+    // message-per-frame; we tolerate either by walking the buffer.
     let nl: number;
     while ((nl = buffer.indexOf("\n")) >= 0) {
       const line = buffer.slice(0, nl).trim();
@@ -93,32 +165,107 @@ export async function createWebSocketTransport(opts: WebSocketTransportOptions):
         // Drop malformed frames silently — we never log raw bytes.
       }
     }
-  };
-  ws.onclose = () => {
+    // Also tolerate a complete JSON envelope arriving without a newline.
+    if (buffer.length > 0) {
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        try {
+          const env = JSON.parse(trimmed);
+          buffer = "";
+          for (const h of messageHandlers) h(env);
+        } catch {
+          // Partial frame; wait for more data.
+        }
+      }
+    }
+  });
+
+  attachCloseHandler(wsAny, () => {
     if (closed) return;
     closed = true;
     for (const h of closeHandlers) h();
-  };
-  ws.onerror = (_e: any) => {
+  });
+  attachErrorHandler(wsAny, () => {
     if (closed) return;
     closed = true;
     // We DON'T forward the underlying event — it may carry callback URLs.
     for (const h of closeHandlers) h(new Error("Codex bridge socket error"));
-  };
+  });
 
   return {
     async send(envelope: any) {
       const frame = JSON.stringify(envelope) + "\n";
-      ws.send(frame);
+      wsAny.send(frame);
     },
     onMessage(h) { messageHandlers.push(h); },
     onClose(h) { closeHandlers.push(h); },
     async close() {
       if (closed) return;
       closed = true;
-      try { ws.close(1000, "client_close"); } catch {}
+      try { wsAny.close(1000, "client_close"); } catch {}
     },
   };
+}
+
+// ─── tiny adapter layer ──────────────────────────────────────────────
+// Both the `ws` package and the browser platform WebSocket expose
+// "open"/"message"/"close"/"error" but with different listener shapes.
+// We hide that here.
+
+async function constructWithImpl(Impl: any, url: URL, opts: WebSocketTransportOptions): Promise<any> {
+  // Custom impls in tests may follow either the platform shape (no
+  // headers param) or the `ws` shape (headers param). We try the
+  // headers-aware variant first and fall back.
+  try {
+    return new Impl(opts.url, undefined, {
+      headers: { Authorization: `Bearer ${opts.capabilityToken}` },
+    });
+  } catch {
+    return new Impl(opts.url);
+  }
+}
+
+async function waitForOpen(ws: any): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("Codex bridge connection timed out")), 8000);
+    if (typeof ws.on === "function") {
+      // ws-package style.
+      ws.once("open", () => { clearTimeout(t); resolve(); });
+      ws.once("unexpected-response", (_req: any, res: any) => {
+        clearTimeout(t);
+        reject(new Error(`Codex bridge handshake failed: HTTP ${res?.statusCode || "?"}`));
+      });
+      ws.once("error", (e: any) => {
+        clearTimeout(t);
+        reject(new Error(`Codex bridge connection error: ${e?.message || "unknown"}`));
+      });
+    } else {
+      ws.onopen = () => { clearTimeout(t); resolve(); };
+      ws.onerror = (e: any) => { clearTimeout(t); reject(new Error(`Codex bridge connection error: ${e?.message || "unknown"}`)); };
+    }
+  });
+}
+
+function attachMessageHandler(ws: any, handler: (data: string) => void) {
+  if (typeof ws.on === "function") {
+    ws.on("message", (data: Buffer | string) => {
+      handler(typeof data === "string" ? data : data.toString("utf8"));
+    });
+  } else {
+    ws.onmessage = (ev: any) => {
+      const data = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
+      handler(data);
+    };
+  }
+}
+
+function attachCloseHandler(ws: any, handler: () => void) {
+  if (typeof ws.on === "function") ws.on("close", handler);
+  else ws.onclose = handler;
+}
+function attachErrorHandler(ws: any, handler: () => void) {
+  if (typeof ws.on === "function") ws.on("error", handler);
+  else ws.onerror = handler;
 }
 
 // ─── Stdio transport (Phase 2 — local runtime only) ──────────────────
