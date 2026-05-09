@@ -27,6 +27,7 @@
 // Selection is always user-driven; we never silently switch billing
 // models or auth accounts.
 
+import * as React from "react";
 import { useEffect, useState } from "react";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -58,11 +59,14 @@ interface LocalStatus {
   version: string | null;
 }
 
+// P64.2 — aligned with real codex 0.130.0 wire shape:
+//   { account: { type: "chatgpt", email, planType } | { type: "apiKey" }
+//             | { type: "amazonBedrock" } | null,
+//     requiresOpenaiAuth: boolean }
 interface AccountState {
-  authMode?: "none" | "chatgpt" | "apiKey";
+  type?: "chatgpt" | "apiKey" | "amazonBedrock";
   email?: string;
-  plan?: string;
-  experimentalApi?: boolean;
+  planType?: string;
 }
 
 interface RateLimits {
@@ -191,7 +195,15 @@ export function CodexSection() {
       const r = await fetch("/api/codex/test-connection", { method: "POST" });
       const j = await r.json();
       if (j.ok) {
-        toast.success("Bridge reachable", `Connected in ${j.elapsedMs}ms · ${j.account?.authMode || "unauthenticated"}`);
+        const t = j.account?.type;
+        const label = t === "chatgpt"
+          ? `ChatGPT (${j.account.email || "signed in"})`
+          : t === "apiKey"
+            ? "API key"
+            : t === "amazonBedrock"
+              ? "Amazon Bedrock"
+              : (j.requiresOpenaiAuth ? "needs sign-in" : "unauthenticated");
+        toast.success("Bridge reachable", `Connected in ${j.elapsedMs}ms · ${label}`);
       } else if (j.requiresBrowserTest) {
         toast.info("Browser-direct", j.error || "Run the test from your browser.");
       } else {
@@ -312,9 +324,16 @@ export function CodexSection() {
       if (Date.now() - start > 120_000) return;
       try {
         const a = await fetch("/api/codex/account").then(r => r.json());
-        if (a.account?.authMode && a.account.authMode !== "none") {
+        if (a.account?.type) {
           setAccount(a.account);
-          toast.success("Signed in", `${a.account.authMode === "chatgpt" ? "ChatGPT" : "API key"} auth active.`);
+          const label = a.account.type === "chatgpt"
+            ? `ChatGPT (${a.account.email || "signed in"})`
+            : a.account.type === "apiKey"
+              ? "API key"
+              : a.account.type === "amazonBedrock"
+                ? "Amazon Bedrock"
+                : a.account.type;
+          toast.success("Signed in", `${label} auth active.`);
           reload();
           return;
         }
@@ -519,10 +538,42 @@ export function CodexSection() {
                   style={{ marginTop: 4 }} />
 
                 <label style={{ ...LABEL, marginTop: 12 }}>
-                  Capability token {bridgeLocation === "tunnel" && <span style={{ color: "#dc2626" }}>(min 32 chars)</span>}
+                  Capability token {bridgeLocation === "tunnel"
+                    ? <span style={{ color: "#dc2626" }}>(≥48 hex chars / 192 bits over public internet)</span>
+                    : <span style={{ color: "var(--text-muted)" }}>(≥24 hex chars / 96 bits)</span>}
                 </label>
-                <input className="input" type="password" value={bridgeToken} onChange={e => setBridgeToken(e.target.value)}
-                  placeholder="The --auth-token you passed to codex app-server" style={{ marginTop: 4 }} />
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  <input className="input" type="password" value={bridgeToken} onChange={e => setBridgeToken(e.target.value)}
+                    placeholder="The capability token whose SHA-256 you passed to codex via --ws-token-sha256"
+                    style={{ flex: 1 }} />
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      // P64.2 — generate 32 random bytes (256-bit) hex.
+                      // crypto.getRandomValues is available in all modern
+                      // browsers; we fall back to Math.random NEVER.
+                      const buf = new Uint8Array(32);
+                      crypto.getRandomValues(buf);
+                      const hex = Array.from(buf).map(b => b.toString(16).padStart(2, "0")).join("");
+                      setBridgeToken(hex);
+                    }}
+                    style={{ fontSize: 11, whiteSpace: "nowrap" }}
+                  >
+                    Generate 256-bit
+                  </button>
+                </div>
+                <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginTop: 6 }}>
+                  After generating, run{" "}
+                  <code className="mono" style={MONO_INLINE}>
+                    SHA=$(echo -n "&lt;TOKEN&gt;" | shasum -a 256 | cut -d' ' -f1)
+                  </code>{" "}
+                  on your machine and start codex with{" "}
+                  <code className="mono" style={MONO_INLINE}>
+                    codex app-server --listen ws://127.0.0.1:8345 --ws-auth capability-token --ws-token-sha256 $SHA
+                  </code>
+                  {". "}Codex requires the token via Authorization header — we send it that way from the server.
+                </div>
 
                 <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12, fontSize: 12 }}>
                   <input type="checkbox" checked={experimentalApi}
@@ -543,7 +594,7 @@ export function CodexSection() {
           {bridge?.configured && (
             <div style={{ marginBottom: 24 }}>
               <h3 style={SUBSECTION}>Account</h3>
-              {!account || account.authMode === "none" ? (
+              {!account || !account.type ? (
                 <div className="card" style={{ padding: 14 }}>
                   <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10 }}>
                     Not signed in. Pick a method.
@@ -564,12 +615,16 @@ export function CodexSection() {
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                     <div>
                       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>
-                        {account.email || "(signed in)"}
+                        {account.email || (account.type === "apiKey" ? "(API key auth)"
+                          : account.type === "amazonBedrock" ? "(Amazon Bedrock)"
+                          : "(signed in)")}
                       </div>
                       <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
-                        {account.authMode === "chatgpt" ? "ChatGPT" : "API key"} auth
-                        {account.plan && ` · plan: ${account.plan}`}
-                        {account.experimentalApi && " · experimentalApi: ON"}
+                        {account.type === "chatgpt" ? "ChatGPT"
+                          : account.type === "apiKey" ? "API key"
+                          : account.type === "amazonBedrock" ? "Amazon Bedrock"
+                          : account.type} auth
+                        {account.planType && ` · plan: ${account.planType}`}
                       </div>
                     </div>
                     <button className="btn" disabled={busy === "logout"}
@@ -681,28 +736,131 @@ function LocalStatusBadge({ available, reason, version }: { available: boolean; 
 
 function CodexLocalPane({ local, onRefresh }: { local: LocalStatus | null; onRefresh: () => void }) {
   const ready = !!local?.supportsSpawn && !!local?.codexInstalled;
+  // P66b — auth probe state. The hosted server NEVER stores codex tokens;
+  // this UI only displays what the local codex tells us about its own
+  // auth state via getAuthStatus.
+  const [auth, setAuth] = React.useState<{
+    loading?: boolean;
+    authMethod?: string | null;
+    requiresOpenaiAuth?: boolean;
+    error?: string | null;
+  } | null>(null);
+  const [testing, setTesting] = React.useState(false);
+
+  const checkAuth = React.useCallback(async () => {
+    setAuth({ loading: true });
+    try {
+      const r = await fetch("/api/codex/local/auth-status");
+      const j = await r.json();
+      if (!r.ok) {
+        setAuth({ error: j.message || j.reason || `HTTP ${r.status}` });
+        return;
+      }
+      setAuth({
+        authMethod: j.authMethod ?? null,
+        requiresOpenaiAuth: j.requiresOpenaiAuth === true,
+      });
+    } catch (e: any) {
+      setAuth({ error: e?.message || "auth probe failed" });
+    }
+  }, []);
+
+  // Auto-probe when the pane becomes ready.
+  React.useEffect(() => {
+    if (!ready) {
+      setAuth(null);
+      return;
+    }
+    checkAuth();
+  }, [ready, checkAuth]);
+
+  // ─── render ───────────────────────────────────────────────────
+  let authBadge: React.ReactNode = null;
+  if (ready) {
+    if (auth?.loading) {
+      authBadge = <span style={{ color: "var(--text-muted)" }}>Checking auth…</span>;
+    } else if (auth?.error) {
+      authBadge = <span style={{ color: "#dc2626" }}>{auth.error}</span>;
+    } else if (auth?.requiresOpenaiAuth) {
+      authBadge = <span style={{ color: "#f59e0b" }}>Login required</span>;
+    } else if (auth?.authMethod) {
+      authBadge = (
+        <span style={{ color: "#16a34a" }}>
+          Authenticated · {auth.authMethod}
+        </span>
+      );
+    }
+  }
+
+  const headlineLabel = ready
+    ? auth?.loading
+      ? "Local Codex detected"
+      : auth?.requiresOpenaiAuth
+        ? "Local Codex detected — login required"
+        : auth?.authMethod
+          ? "Local Codex ready"
+          : "Local Codex detected"
+    : "Local Codex not available";
+
+  const headlineDetail = ready
+    ? `Detected ${local?.version || "codex"}. Turns spawn codex app-server over stdio — no paste, no companion needed.`
+    : local?.reason === "vercel-hosted"
+      ? "This app is hosted in the cloud. Codex Local needs to run on the same machine as the user. Use Codex Companion or run Hyperagent locally."
+      : !local?.codexInstalled
+        ? "Install the codex CLI from https://github.com/openai/codex, then click Refresh below."
+        : "Local mode disabled by the operator (HYPERAGENT_DISABLE_LOCAL_CODEX=1).";
+
   return (
     <div className="card" style={{ padding: 14 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>
-            {ready ? "Local Codex ready" : "Local Codex not available"}
-          </div>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{headlineLabel}</div>
           <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
-            {ready
-              ? `Detected ${local?.version || "codex"}. Turns will spawn codex app-server over stdio — no paste, no companion needed.`
-              : local?.reason === "vercel-hosted"
-                ? "This app is hosted in the cloud. Codex Local needs a long-lived host where Hyperagent can spawn child processes ON THE SAME MACHINE THE USER IS ON. Use Codex Companion (recommended) or run Hyperagent locally."
-                : !local?.codexInstalled
-                  ? "Install the codex CLI from https://github.com/openai/codex, then click Refresh below."
-                  : "Local mode disabled by the operator (HYPERAGENT_DISABLE_LOCAL_CODEX=1)."}
+            {headlineDetail}
           </div>
+          {authBadge && (
+            <div style={{ fontSize: 11, marginTop: 6 }}>{authBadge}</div>
+          )}
         </div>
-        <button onClick={onRefresh} className="btn"
-          style={{ fontSize: 11, padding: "5px 10px" }}>
-          Refresh
-        </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <button onClick={() => { onRefresh(); checkAuth(); }} className="btn"
+            style={{ fontSize: 11, padding: "5px 10px" }}>
+            Refresh
+          </button>
+          {ready && (
+            <button onClick={async () => {
+              setTesting(true);
+              try { await checkAuth(); } finally { setTesting(false); }
+            }} className="btn" style={{ fontSize: 11, padding: "5px 10px" }} disabled={testing}>
+              {testing ? "Testing…" : "Test"}
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Login instructions when codex is detected but unauthenticated. */}
+      {ready && auth?.requiresOpenaiAuth && (
+        <div style={{
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border)",
+          borderRadius: 6,
+          padding: 10,
+          fontSize: 11,
+          marginBottom: 10,
+          color: "var(--text-muted)",
+          lineHeight: 1.55,
+        }}>
+          To sign in to ChatGPT, run this in another terminal:
+          <pre className="mono" style={{
+            margin: "6px 0 0",
+            padding: "6px 8px",
+            background: "var(--bg)",
+            borderRadius: 4,
+            fontSize: 11,
+          }}>codex auth login</pre>
+          Then click <strong>Test</strong> above. Tokens stay on your machine — Hyperagent never reads or stores them.
+        </div>
+      )}
 
       <details style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.55 }}>
         <summary style={{ cursor: "pointer", marginBottom: 6 }}>Where Local mode is and isn&apos;t available</summary>
@@ -728,15 +886,299 @@ function CodexLocalPane({ local, onRefresh }: { local: LocalStatus | null; onRef
   );
 }
 
+// P65 — Companion pairing UI.
+//
+// State machine:
+//   not_installed → pending (pair-code generated, waiting for companion)
+//                 → online (companion claimed + heartbeat fresh)
+//                 → offline (claimed, no recent heartbeat)
+//                 → revoked / expired
+//
+// We poll /api/codex/pair/status every 2s while we have a sessionId
+// in local state. Once online, we increase the poll interval to 10s
+// to reduce hosted-side load.
 function CodexCompanionPane() {
+  const [sessionId, setSessionId] = React.useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return localStorage.getItem("codex-companion:sessionId") || null;
+  });
+  const [pairCode, setPairCode] = React.useState<string | null>(null);
+  const [pairExpiresAt, setPairExpiresAt] = React.useState<number | null>(null);
+  const [status, setStatus] = React.useState<{
+    status?: string;
+    online?: boolean;
+    companionBaseUrl?: string | null;
+    companionInfo?: any;
+    expiresAt?: number;
+    lastHeartbeatAt?: number | null;
+  } | null>(null);
+  const [busy, setBusy] = React.useState<string | null>(null);
+  const [errorMsg, setErrorMsg] = React.useState<string | null>(null);
+  const [copied, setCopied] = React.useState(false);
+
+  // Compute the npx command. host defaults to current origin.
+  const host = typeof window !== "undefined" ? window.location.origin : "";
+  const command = pairCode
+    ? `npx hyperagent-codex-companion ${pairCode} --host=${host}`
+    : "";
+
+  async function generatePairCode() {
+    setBusy("start");
+    setErrorMsg(null);
+    try {
+      const r = await fetch("/api/codex/pair/start", { method: "POST" });
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        if (r.status === 429) {
+          throw new Error("Too many pair codes generated recently. Wait a minute and try again.");
+        }
+        throw new Error(j.error || `pair/start failed: ${r.status}`);
+      }
+      const j = await r.json();
+      setPairCode(j.pairCode);
+      setPairExpiresAt(j.expiresAt);
+      setSessionId(j.sessionId);
+      try { localStorage.setItem("codex-companion:sessionId", j.sessionId); } catch {}
+    } catch (e: any) {
+      setErrorMsg(e?.message || "Failed to generate pair code");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function copyCommand() {
+    if (!command) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setErrorMsg("Couldn't copy to clipboard. Select the command manually.");
+    }
+  }
+
+  async function disconnect() {
+    if (!sessionId) return;
+    setBusy("revoke");
+    try {
+      await fetch("/api/codex/pair/revoke", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sessionId }),
+      });
+    } catch {}
+    try { localStorage.removeItem("codex-companion:sessionId"); } catch {}
+    setSessionId(null);
+    setPairCode(null);
+    setPairExpiresAt(null);
+    setStatus(null);
+    setBusy(null);
+  }
+
+  // Poll status whenever we have a sessionId.
+  React.useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    let timer: any = null;
+    const tick = async () => {
+      if (cancelled) return;
+      try {
+        const r = await fetch(`/api/codex/pair/status?sessionId=${encodeURIComponent(sessionId)}`);
+        if (cancelled) return;
+        if (r.ok) {
+          const j = await r.json();
+          setStatus(j);
+          // If revoked or expired, stop polling and clear local state.
+          if (j.status === "revoked" || j.status === "expired") {
+            try { localStorage.removeItem("codex-companion:sessionId"); } catch {}
+            // Keep the row visible briefly so user sees the state, then reset.
+            setTimeout(() => {
+              if (cancelled) return;
+              setSessionId(null);
+              setPairCode(null);
+              setPairExpiresAt(null);
+              setStatus(null);
+            }, 4000);
+            return;
+          }
+          // Online → slow poll. Pending/offline → fast poll.
+          const next = j.online ? 10_000 : 2_500;
+          timer = setTimeout(tick, next);
+          return;
+        }
+        if (r.status === 404) {
+          try { localStorage.removeItem("codex-companion:sessionId"); } catch {}
+          setSessionId(null);
+          setStatus(null);
+          return;
+        }
+      } catch {}
+      timer = setTimeout(tick, 5_000);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [sessionId]);
+
+  // ─── render ────────────────────────────────────────────────────
+  const pairExpiresIn = pairExpiresAt
+    ? Math.max(0, Math.floor((pairExpiresAt - Date.now()) / 1000))
+    : 0;
+
   return (
-    <div className="card" style={{ padding: 14 }}>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
-        Companion is the next ship
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      {/* Honest banner */}
+      <div className="card" style={{ padding: 12, background: "color-mix(in srgb, var(--accent) 6%, transparent)" }}>
+        <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.55 }}>
+          <strong>Experimental.</strong> This mode uses a local companion on your computer. The hosted app cannot directly start or reach processes on your laptop. The browser connects to the local companion, and the companion connects to Codex app-server. Disconnect anytime.
+        </div>
       </div>
-      <div style={{ fontSize: 11.5, color: "var(--text-muted)", lineHeight: 1.5 }}>
-        The companion is a tiny app you install on your machine. It runs codex app-server locally and pairs with this hosted app over a short-lived signed token — no manual URL/token paste. Until it lands, use Codex Local (running Hyperagent on your machine) or the Codex Bridge advanced fallback.
+
+      {/* Status panel */}
+      <CompanionStatusPanel status={status} hasSession={!!sessionId} pairCode={pairCode} pairExpiresIn={pairExpiresIn} />
+
+      {/* Main action card — either pair-code generator or pair-code display */}
+      {!sessionId || (status && (status.status === "expired" || status.status === "revoked")) ? (
+        <div className="card" style={{ padding: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Install local Codex companion</div>
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.55 }}>
+            Generates a short-lived pair code. Run the printed command on your machine; the companion claims the code and pairs.
+          </div>
+          <button className="btn btn-primary" disabled={busy === "start"} onClick={generatePairCode}
+            style={{ fontSize: 12 }}>
+            {busy === "start" ? "Generating…" : "Generate pair code"}
+          </button>
+        </div>
+      ) : pairCode ? (
+        <div className="card" style={{ padding: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
+            Run this on your machine
+          </div>
+          <div style={{ fontSize: 10.5, color: "var(--text-muted)", marginBottom: 8 }}>
+            Pair code expires in {pairExpiresIn}s. After it claims, the companion stays paired for ~24h.
+          </div>
+          <pre className="mono" style={{
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            padding: 10,
+            fontSize: 11,
+            overflow: "auto",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-all",
+            margin: 0,
+          }}>{command}</pre>
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button className="btn" onClick={copyCommand} style={{ fontSize: 11 }}>
+              {copied ? "Copied" : "Copy command"}
+            </button>
+            <button className="btn" onClick={generatePairCode} disabled={busy === "start"} style={{ fontSize: 11 }}>
+              {busy === "start" ? "Regenerating…" : "Regenerate"}
+            </button>
+            <div style={{ flex: 1 }} />
+            <button className="btn" onClick={disconnect} disabled={busy === "revoke"} style={{ fontSize: 11, color: "#dc2626" }}>
+              {busy === "revoke" ? "Cancelling…" : "Cancel"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="card" style={{ padding: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>Companion paired</div>
+          <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginBottom: 10 }}>
+            {status?.online
+              ? "Browser will connect to your local companion the next time you start a Codex turn."
+              : "Companion claimed but not heartbeating. Check the terminal where you ran the npx command."}
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="btn" onClick={() => setPairCode(null) || generatePairCode()}
+              disabled={busy === "start"} style={{ fontSize: 11 }}>
+              {busy === "start" ? "Regenerating…" : "Re-pair"}
+            </button>
+            <div style={{ flex: 1 }} />
+            <button className="btn" onClick={disconnect} disabled={busy === "revoke"} style={{ fontSize: 11, color: "#dc2626" }}>
+              {busy === "revoke" ? "Disconnecting…" : "Disconnect"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {errorMsg && (
+        <div className="card" style={{ padding: 10, fontSize: 11.5, color: "#dc2626" }}>{errorMsg}</div>
+      )}
+
+      <details>
+        <summary style={{ fontSize: 11.5, color: "var(--text-muted)", cursor: "pointer" }}>Troubleshooting</summary>
+        <ul style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.6, margin: "6px 0 0 18px", paddingLeft: 0 }}>
+          <li><strong>"Codex binary not found"</strong> — install codex from github.com/openai/codex, then re-run the npx command.</li>
+          <li><strong>"Codex auth: needs_login"</strong> — run <code>codex auth login</code> in another terminal first.</li>
+          <li><strong>Browser can't reach localhost</strong> — Chrome's Private Network Access blocks insecure origins from talking to private networks. Make sure you're using https:// for the hosted app.</li>
+          <li><strong>403 origin_not_allowed</strong> — the host arg passed to the npx command must match the URL of the hosted app you're signed in to.</li>
+          <li><strong>Status stuck on "Waiting"</strong> — the companion couldn't claim. Run <code>npx hyperagent-codex-companion --status</code> on your machine to inspect.</li>
+        </ul>
+      </details>
+    </div>
+  );
+}
+
+function CompanionStatusPanel({
+  status,
+  hasSession,
+  pairCode,
+  pairExpiresIn,
+}: {
+  status: any;
+  hasSession: boolean;
+  pairCode: string | null;
+  pairExpiresIn: number;
+}) {
+  let label = "Not installed";
+  let dot = "#9ca3af"; // gray
+  let detail = "Generate a pair code to begin.";
+  if (hasSession && !status) {
+    label = "Connecting…";
+    dot = "#9ca3af";
+    detail = "Asking the hosted app for status…";
+  } else if (status?.status === "pending") {
+    label = pairCode ? "Waiting for companion" : "Waiting";
+    dot = "#f59e0b";
+    detail = pairCode
+      ? `Run the npx command. Pair code valid for ${pairExpiresIn}s.`
+      : "Pair code consumed; waiting for companion to come online.";
+  } else if (status?.status === "claimed" && status?.online) {
+    label = "Companion online";
+    dot = "#16a34a";
+    const ci = status.companionInfo || {};
+    detail = ci.codex?.version
+      ? `${ci.codex.version} on ${ci.platform || "unknown"}.`
+      : `Heartbeat fresh.`;
+  } else if (status?.status === "claimed" && !status?.online) {
+    label = "Companion paired but offline";
+    dot = "#f59e0b";
+    detail = "No heartbeat in the last 90s. Check the terminal where you ran the npx command.";
+  } else if (status?.status === "expired") {
+    label = "Session expired";
+    dot = "#dc2626";
+    detail = "Generate a new pair code.";
+  } else if (status?.status === "revoked") {
+    label = "Disconnected";
+    dot = "#dc2626";
+    detail = "Companion session was revoked.";
+  }
+
+  return (
+    <div className="card" style={{ padding: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span aria-hidden style={{
+          display: "inline-block",
+          width: 8, height: 8,
+          borderRadius: 99,
+          background: dot,
+        }} />
+        <div style={{ fontSize: 12.5, fontWeight: 600 }}>{label}</div>
       </div>
+      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>{detail}</div>
     </div>
   );
 }
