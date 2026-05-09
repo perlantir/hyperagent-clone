@@ -21,16 +21,28 @@ import { NATIVE_TOOL_CATALOG } from "./types";
 // to P41. Each row reveals action-buttons + last-fired info.
 
 export function InvocationsTab({ agent }: { agent: AgentLike }) {
+  const toast = useToast();
   const [origin, setOrigin] = useState("");
   const [schedules, setSchedules] = useState<any[]>([]);
   const [slackWorkspaces, setSlackWorkspaces] = useState<any[]>([]);
+  const [emailAddresses, setEmailAddresses] = useState<any[]>([]);
+  const [emailDomain, setEmailDomain] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [newEmailSlug, setNewEmailSlug] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
 
-  useEffect(() => {
+  const reload = useCallback(async () => {
     if (typeof window !== "undefined") setOrigin(window.location.origin);
     fetch("/api/schedules").then(r => r.json()).then(j => setSchedules((j.schedules || []).filter((s: any) => s.agentId === agent.id)));
     fetch("/api/settings/slack-workspaces").then(r => r.json()).then(j => setSlackWorkspaces((j.workspaces || []).filter((w: any) => w.agentId === agent.id)));
+    fetch(`/api/agents/${agent.id}/email-addresses`).then(r => r.json()).then(j => {
+      setEmailAddresses(j.addresses || []);
+      setEmailDomain(j.domain || "");
+    });
+    fetch(`/api/agents/${agent.id}/webhook-secret`).then(r => r.json()).then(j => setWebhookSecret(j.secret || null));
   }, [agent.id]);
+  useEffect(() => { reload(); }, [reload]);
 
   function copy(value: string, label: string) {
     try {
@@ -38,6 +50,42 @@ export function InvocationsTab({ agent }: { agent: AgentLike }) {
       setCopied(label);
       setTimeout(() => setCopied(null), 1200);
     } catch {}
+  }
+
+  async function rotateSecret() {
+    setBusy("rotate");
+    const r = await fetch(`/api/agents/${agent.id}/webhook-secret`, { method: "POST" });
+    setBusy(null);
+    if (r.ok) {
+      const j = await r.json();
+      setWebhookSecret(j.secret);
+      toast.success("Webhook secret rotated", "Update any callers using the previous secret.");
+    } else toast.error("Rotate failed");
+  }
+
+  async function clearSecret() {
+    setBusy("clear");
+    const r = await fetch(`/api/agents/${agent.id}/webhook-secret`, { method: "DELETE" });
+    setBusy(null);
+    if (r.ok) { setWebhookSecret(null); toast.success("Webhook secret cleared"); }
+    else toast.error("Clear failed");
+  }
+
+  async function addEmail() {
+    if (!newEmailSlug.trim()) return;
+    setBusy("email");
+    const r = await fetch(`/api/agents/${agent.id}/email-addresses`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug: newEmailSlug.trim() }),
+    });
+    setBusy(null);
+    if (r.ok) {
+      setNewEmailSlug("");
+      reload();
+      toast.success("Email address provisioned");
+    } else {
+      toast.error("Couldn't provision", (await r.json().catch(() => ({}))).error);
+    }
   }
 
   const webhookUrl = `${origin}/api/v1/agents/${agent.id}/invoke`;
@@ -62,10 +110,10 @@ export function InvocationsTab({ agent }: { agent: AgentLike }) {
 
       <ChannelRow
         title="Webhook"
-        sub="Per-agent public URL. Pair with an API key from Settings."
+        sub="Per-agent public URL. Authenticate with an API key (Settings) OR an HMAC-signed signature using the per-agent secret below."
         status="active" statusLabel="PROD"
         body={
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <code className="mono" style={{
                 flex: 1, padding: "8px 10px", background: "var(--bg-subtle)",
@@ -74,10 +122,48 @@ export function InvocationsTab({ agent }: { agent: AgentLike }) {
               }}>{webhookUrl}</code>
               <button className="btn" onClick={() => copy(webhookUrl, "url")}
                 style={{ fontSize: 11, padding: "5px 12px" }}>
-                {copied === "url" ? "✓" : "Copy"}
+                {copied === "url" ? "✓" : "Copy URL"}
               </button>
               <Link href="/settings" className="btn"
                 style={{ fontSize: 11, padding: "5px 12px" }}>API keys</Link>
+            </div>
+            {/* Webhook signing secret (P41) */}
+            <div style={{ paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <div style={{ fontSize: 11.5, fontWeight: 600 }}>HMAC signing secret</div>
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button className="btn" onClick={rotateSecret} disabled={busy === "rotate"} style={{ fontSize: 11, padding: "4px 10px" }}>
+                    {webhookSecret ? "Rotate" : "Generate"}
+                  </button>
+                  {webhookSecret && (
+                    <button className="btn" onClick={clearSecret} disabled={busy === "clear"} style={{ fontSize: 11, padding: "4px 10px", color: "#dc2626" }}>
+                      Clear
+                    </button>
+                  )}
+                </div>
+              </div>
+              {webhookSecret ? (
+                <>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 8 }}>
+                    <code className="mono" style={{
+                      flex: 1, padding: "6px 10px", background: "var(--bg-subtle)",
+                      border: "1px solid var(--border)", borderRadius: 6,
+                      fontSize: 11, overflow: "auto", whiteSpace: "nowrap",
+                    }}>{webhookSecret}</code>
+                    <button className="btn" onClick={() => copy(webhookSecret, "secret")}
+                      style={{ fontSize: 11, padding: "4px 10px" }}>
+                      {copied === "secret" ? "✓" : "Copy"}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                    Sign each request: <code className="mono">X-Hyperagent-Signature: t=&lt;unix&gt;,v1=HMAC_SHA256(secret, "&lt;unix&gt;.&lt;body&gt;")</code>. 5-minute clock skew tolerance enforced.
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+                  No signing secret. API-key auth still works. Generate a secret to accept signed webhooks (Stripe-style HMAC).
+                </div>
+              )}
             </div>
           </div>
         }
@@ -127,11 +213,51 @@ export function InvocationsTab({ agent }: { agent: AgentLike }) {
 
       <ChannelRow
         title="Email"
-        sub="Forward an email to a per-agent address; the agent replies inline."
-        status="planned" statusLabel="P41"
+        sub="Forward an email to a per-agent address; each inbound spawns a new thread. Outbound reply tools land in a follow-on slice."
+        status={emailAddresses.length > 0 ? "active" : "inactive"}
+        statusLabel={emailAddresses.length > 0 ? `${emailAddresses.length} ADDRESS${emailAddresses.length === 1 ? "" : "ES"}` : "NONE"}
         body={
-          <div style={{ fontSize: 12, color: "var(--text-muted)" }}>
-            Inbound-email infra (SendGrid Inbound Parse / SES) lands in P41. The execution path is identical to webhook + thread, just bridged through email.
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {emailAddresses.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {emailAddresses.map((a: any) => (
+                  <div key={a.id} style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    padding: "6px 10px", background: "var(--bg-subtle)",
+                    borderRadius: 6, fontSize: 12,
+                  }}>
+                    <code className="mono" style={{ flex: 1, fontSize: 11.5 }}>{a.address}</code>
+                    <span style={{ fontSize: 10.5, color: "var(--text-faint)" }}>
+                      {a.messageCount} email{a.messageCount === 1 ? "" : "s"} received
+                    </span>
+                    <button className="btn" onClick={() => copy(a.address, `addr-${a.id}`)}
+                      style={{ fontSize: 11, padding: "3px 9px" }}>
+                      {copied === `addr-${a.id}` ? "✓" : "Copy"}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <input
+                value={newEmailSlug}
+                onChange={e => setNewEmailSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+                placeholder="slug"
+                style={{
+                  flex: "0 1 180px", padding: "6px 10px",
+                  border: "1px solid var(--border)", borderRadius: 6,
+                  background: "var(--bg)", color: "var(--text)", fontSize: 12,
+                  outline: "none",
+                }} />
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>@{emailDomain || "agents.hyperagent.app"}</span>
+              <button className="btn btn-primary" onClick={addEmail} disabled={busy === "email" || !newEmailSlug.trim()}
+                style={{ fontSize: 11, padding: "5px 12px" }}>
+                {busy === "email" ? "…" : "+ Add address"}
+              </button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
+              Configure SendGrid Inbound Parse (or SES) to POST to <code className="mono">/api/email/inbound</code> with shared secret <code className="mono">SENDGRID_INBOUND_SECRET</code>. Each inbound email creates a thread bound to this agent.
+            </div>
           </div>
         }
       />

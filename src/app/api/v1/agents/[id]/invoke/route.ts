@@ -44,33 +44,71 @@ function hashKey(raw: string) {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
-// Same key resolution as /api/v1/chat. Returns null on missing/invalid.
-async function authenticate(req: Request): Promise<string | null> {
+// Two auth modes:
+//   1. Bearer hak_... (API key) — global, scoped to user.
+//   2. X-Hyperagent-Signature: t=<unix>,v1=<hmac> — per-agent webhook
+//      secret. HMAC-SHA256 over `<unix>.<raw_body>`. 5-min skew tolerance.
+//      Lets users wire raw webhooks (Stripe-style) without minting API keys.
+async function authenticate(req: Request, agentId: string, rawBody: string): Promise<string | null> {
+  // 1. Bearer-token path (existing).
   const auth = req.headers.get("authorization") || "";
   const m = auth.match(/^Bearer\s+(hak_[A-Za-z0-9_-]+)$/);
-  if (!m) return null;
-  try {
-    const r = await pool().query(
-      `SELECT "userId", id FROM api_keys WHERE "keyHash"=$1`,
-      [hashKey(m[1])],
-    );
-    if (!r.rows[0]) return null;
-    await pool().query(
-      `UPDATE api_keys SET "lastUsedAt"=$1 WHERE id=$2`,
-      [Date.now(), r.rows[0].id],
-    );
-    return r.rows[0].userId;
-  } catch (e) {
-    console.error("[v1/agents/invoke authenticate]", e);
-    return null;
+  if (m) {
+    try {
+      const r = await pool().query(
+        `SELECT "userId", id FROM api_keys WHERE "keyHash"=$1`,
+        [hashKey(m[1])],
+      );
+      if (r.rows[0]) {
+        await pool().query(
+          `UPDATE api_keys SET "lastUsedAt"=$1 WHERE id=$2`,
+          [Date.now(), r.rows[0].id],
+        );
+        return r.rows[0].userId;
+      }
+    } catch (e) { console.error("[v1/agents/invoke authenticate bearer]", e); }
   }
+
+  // 2. P41 — HMAC signature path. Per-agent webhook secret.
+  const sigHeader = req.headers.get("x-hyperagent-signature");
+  if (sigHeader) {
+    try {
+      const parts = Object.fromEntries(sigHeader.split(",").map(p => p.split("=")));
+      const ts = parts.t;
+      const v1 = parts.v1;
+      if (!ts || !v1) return null;
+      // 5-minute skew tolerance.
+      if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return null;
+
+      const r = await pool().query(
+        `SELECT "userId", "webhookSecret" FROM agents WHERE id=$1`,
+        [agentId],
+      );
+      const row = r.rows[0];
+      if (!row || !row.webhookSecret) return null;
+
+      const expected = crypto.createHmac("sha256", row.webhookSecret)
+        .update(`${ts}.${rawBody}`).digest("hex");
+      const a = Buffer.from(expected);
+      const b = Buffer.from(v1);
+      if (a.length !== b.length) return null;
+      if (!crypto.timingSafeEqual(a, b)) return null;
+      return row.userId;
+    } catch (e) { console.error("[v1/agents/invoke authenticate hmac]", e); }
+  }
+
+  return null;
 }
 
 export async function POST(req: Request, { params }: { params: { id: string } }) {
-  const userId = await authenticate(req);
+  // P41 — read the raw body once so we can both HMAC-verify and JSON-parse
+  // it. Cloning would also work but raw text + manual parse is simplest.
+  const rawBody = await req.text();
+
+  const userId = await authenticate(req, params.id, rawBody);
   if (!userId) {
     await audit({ userId: null, action: "api_key.used", result: "denied", ...auditFromRequest(req) });
-    return NextResponse.json({ error: "Invalid or missing API key" }, { status: 401 });
+    return NextResponse.json({ error: "Invalid or missing credentials (Bearer token or X-Hyperagent-Signature)" }, { status: 401 });
   }
 
   // Rate limit shares the namespace with /api/v1/chat so a noisy caller
@@ -100,7 +138,10 @@ export async function POST(req: Request, { params }: { params: { id: string } })
     ...auditFromRequest(req),
   });
 
-  const { message, threadId: existingThreadId } = await req.json().catch(() => ({}));
+  // We've already consumed the body above for HMAC; parse the captured raw text.
+  let parsed: any = {};
+  try { parsed = rawBody ? JSON.parse(rawBody) : {}; } catch {}
+  const { message, threadId: existingThreadId } = parsed;
   if (!message) return NextResponse.json({ error: "message required" }, { status: 400 });
 
   if ((await balance(userId)) <= 0) return NextResponse.json({ error: "out of credits" }, { status: 402 });

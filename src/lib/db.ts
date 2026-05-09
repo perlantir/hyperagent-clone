@@ -51,6 +51,24 @@ async function initSchema() {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS "subagentModelId" TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS "extendedThinking" BOOLEAN NOT NULL DEFAULT FALSE;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar TEXT;
+    -- P41 — per-agent webhook signing secret. When set, /api/v1/agents/[id]/invoke
+    -- accepts HMAC-signed requests as an alternative to bearer-token auth.
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS "webhookSecret" TEXT;
+    -- P41 — per-agent email inbound addresses. Each address routes incoming
+    -- email to a specific agent. Address format: <slug>@<domain> (domain is
+    -- platform-configured). Multiple addresses per agent allowed (e.g. one
+    -- per workflow).
+    CREATE TABLE IF NOT EXISTS agent_email_addresses (
+      id TEXT PRIMARY KEY,
+      "userId" TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      "agentId" TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      address TEXT NOT NULL UNIQUE,
+      "createdAt" BIGINT NOT NULL,
+      "lastReceivedAt" BIGINT,
+      "messageCount" INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_email_user ON agent_email_addresses("userId");
+    CREATE INDEX IF NOT EXISTS idx_agent_email_agent ON agent_email_addresses("agentId");
     -- P31b — append-only artifact version history. The live artifacts row
     -- is the latest state; this table records every prior body before edits.
     CREATE TABLE IF NOT EXISTS artifact_versions (
