@@ -12,22 +12,33 @@
 
 // Three explicit modes. Selection is always user-driven; we never
 // silently switch between billing models or accounts.
+//
+// P58 — collapsed the platform-vs-BYOK split. resolveSecret already
+// falls back from user_secrets to env, so a single "openaiApiKey" mode
+// covers both. The three modes the UI exposes are now:
+//
+//   anthropicApiKey   — Anthropic Claude (default)
+//   openaiApiKey      — OpenAI Chat Completions API
+//   codexChatGPT      — EXPERIMENTAL Codex via ChatGPT Sign-In bridge
 export type CodexProviderMode =
-  // Stable production default. Uses our platform OpenAI key. Billed to
-  // the platform account.
+  | "anthropicApiKey"
   | "openaiApiKey"
-  // User-provided OpenAI API key (encrypted at rest). User controls billing.
-  | "openaiUserApiKey"
-  // EXPERIMENTAL — Codex via ChatGPT Sign-In. Each user authenticates
-  // their own ChatGPT account. Usage follows their plan + workspace
-  // permissions. Must NOT be pooled or resold.
   | "codexChatGPT";
 
 export const CODEX_PROVIDER_MODES: readonly CodexProviderMode[] = [
+  "anthropicApiKey",
   "openaiApiKey",
-  "openaiUserApiKey",
   "codexChatGPT",
 ] as const;
+
+// P58 — defensive normalization for legacy values stored in the DB.
+// Pre-rework rows might say "openaiUserApiKey"; collapse to "openaiApiKey".
+// Anything outside the enum becomes the default mode.
+export function normalizeProviderMode(raw: any): CodexProviderMode {
+  if (raw === "openaiUserApiKey") return "openaiApiKey";
+  if (CODEX_PROVIDER_MODES.includes(raw)) return raw as CodexProviderMode;
+  return "anthropicApiKey";
+}
 
 // ─── JSON-RPC 2.0 wire types ─────────────────────────────────────────
 

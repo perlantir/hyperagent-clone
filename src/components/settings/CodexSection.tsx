@@ -19,7 +19,7 @@ import { useEffect, useState } from "react";
 import { useToast } from "@/components/Toast";
 import { useConfirm } from "@/components/ConfirmDialog";
 
-type ProviderMode = "openaiApiKey" | "openaiUserApiKey" | "codexChatGPT";
+type ProviderMode = "anthropicApiKey" | "openaiApiKey" | "codexChatGPT";
 
 interface BridgeStatus {
   configured: boolean;
@@ -47,7 +47,7 @@ interface RateLimits {
 export function CodexSection() {
   const toast = useToast();
   const confirm = useConfirm();
-  const [mode, setMode] = useState<ProviderMode>("openaiApiKey");
+  const [mode, setMode] = useState<ProviderMode>("anthropicApiKey");
   const [bridge, setBridge] = useState<BridgeStatus | null>(null);
   const [account, setAccount] = useState<AccountState | null>(null);
   const [rateLimits, setRateLimits] = useState<RateLimits | null>(null);
@@ -216,34 +216,35 @@ export function CodexSection() {
 
   return (
     <div>
-      <h2 style={SECTION_HEADER}>Codex / OpenAI</h2>
+      <h2 style={SECTION_HEADER}>Chat provider</h2>
       <p style={SECTION_LEAD}>
-        Pick how OpenAI traffic is authenticated. Codex via ChatGPT Sign-In is experimental and
-        requires running <code className="mono" style={MONO_INLINE}>codex app-server</code> locally as a bridge.
+        Pick which provider runs your chat turns. Switching is explicit — we never silently fall back
+        between providers, billing models, or accounts. Your selection applies to every new turn in
+        every thread until you change it.
       </p>
 
       {/* Mode picker */}
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
         <ModeRow
+          id="anthropicApiKey"
+          label="Anthropic (Claude)"
+          desc="Default. Uses your Anthropic key from Settings → API Keys, falling back to the platform key. Full HyperAgent tool-loop, prompt caching, plan mode, multi-turn iteration."
+          active={mode === "anthropicApiKey"}
+          disabled={busy === "mode"}
+          onPick={() => chooseMode("anthropicApiKey")}
+        />
+        <ModeRow
           id="openaiApiKey"
-          label="Platform OpenAI key"
-          desc="Stable production default. Uses our platform OpenAI account; usage billed there."
+          label="OpenAI API"
+          desc="OpenAI Chat Completions (GPT-4o, GPT-4o mini, o1). Single-pass turns; tool calls surface in the UI but don't auto-iterate server-side. Uses your OpenAI key from Settings → API Keys."
           active={mode === "openaiApiKey"}
           disabled={busy === "mode"}
           onPick={() => chooseMode("openaiApiKey")}
         />
         <ModeRow
-          id="openaiUserApiKey"
-          label="Your OpenAI API key"
-          desc="Bring-your-own-key. Paste in API Keys; encrypted at rest. You control billing."
-          active={mode === "openaiUserApiKey"}
-          disabled={busy === "mode"}
-          onPick={() => chooseMode("openaiUserApiKey")}
-        />
-        <ModeRow
           id="codexChatGPT"
-          label={<>Codex via ChatGPT Sign-In <span style={{ color: "#f59e0b", fontSize: 10, fontWeight: 700, marginLeft: 6, letterSpacing: 0.4 }}>EXPERIMENTAL</span></>}
-          desc="Sign in with your own ChatGPT/Codex account via a local Codex app-server bridge. Usage follows your plan, workspace permissions, and retention settings."
+          label={<>OpenAI Codex (ChatGPT Sign-In) <span style={{ color: "#f59e0b", fontSize: 10, fontWeight: 700, marginLeft: 6, letterSpacing: 0.4 }}>EXPERIMENTAL</span></>}
+          desc="Sign in with your own ChatGPT account via a local codex app-server bridge. Codex owns the thread state. Usage follows your ChatGPT plan, workspace permissions, RBAC, and retention settings."
           active={mode === "codexChatGPT"}
           disabled={busy === "mode"}
           onPick={() => chooseMode("codexChatGPT")}

@@ -33,6 +33,9 @@ import { recordFinding } from "@/lib/rubric-improvement";
 import { getEventsForRun } from "@/lib/traces";
 import { getWorkingDoc } from "@/lib/working-memory";
 import { getCurrentAgentVersion } from "@/lib/agent-versions";
+import { getProviderMode } from "@/lib/codex/store";
+import { getBridgeConfig } from "@/lib/codex/store";
+import { runOpenAITurn, runCodexChatTurn } from "@/lib/chat-dispatch";
 // Note: scheduler is now driven by Vercel Cron at /api/cron, no in-process loop.
 
 export const dynamic = "force-dynamic";
@@ -332,6 +335,65 @@ Do not skip the planning step even if the request seems simple.`,
         let accumulatedText = "";
         const toolCallsPersisted: { name: string; args: any; result?: string; durationMs?: number }[] = [];
         const artifactIds: string[] = [];
+        // P58 — provider-mode dispatch. If the user picked OpenAI or Codex,
+        // we run an alternative single-pass path that emits compatible
+        // SSE events, then skip the Anthropic tool-loop. Anthropic remains
+        // the default (legacy chat behaviour preserved exactly).
+        let skipMainLoop = false;
+        const providerMode = await getProviderMode(user.id).catch(() => "anthropicApiKey" as const);
+        if (providerMode === "openaiApiKey") {
+          // OpenAI Chat Completions path. Single iteration, function-calling
+          // surfaces as tool_use events but we DON'T loop server-side: if
+          // the model wants tool execution + a follow-up, the user re-sends.
+          const oaModel = (() => {
+            const m = bodyModelId || (agent as any)?.modelId || "";
+            return /^gpt-/i.test(m) ? m : "gpt-4o";
+          })();
+          // Build a flat system string (no cache_control breakpoints).
+          const sys = systemBlocks.map((b: any) => typeof b === "string" ? b : (b?.text || "")).join("\n\n");
+          // Convert anthropicMessages into the unified shape — content
+          // arrays collapse to text-only for the OpenAI path.
+          const flatMessages = anthropicMessages.map((m: any) => ({
+            role: m.role as "user" | "assistant",
+            content: typeof m.content === "string" ? m.content
+              : Array.isArray(m.content)
+                ? m.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n")
+                : "",
+          }));
+          const r = await runOpenAITurn({
+            userId: user.id, modelId: oaModel,
+            system: sys, messages: flatMessages, tools, send,
+          });
+          accumulatedText = r.text;
+          for (const tu of r.toolUses) toolCallsPersisted.push({ name: tu.name, args: tu.args });
+          totalIn = r.inputTokens; totalOut = r.outputTokens;
+          if (r.errored) emitter.emit("error", { source: "openai", message: r.errorMessage || "openai turn failed" });
+          else emitter.emit("llm_call", { model: oaModel, inputTokens: totalIn, outputTokens: totalOut });
+          skipMainLoop = true;
+        } else if (providerMode === "codexChatGPT") {
+          const bridge = await getBridgeConfig(user.id);
+          if (!bridge) {
+            send({ type: "error", message: "Codex provider mode is selected, but no bridge is configured. Configure one in Settings → Codex / OpenAI." });
+            emitter.emit("error", { source: "codex", message: "no bridge configured" });
+            skipMainLoop = true;
+          } else {
+            const r = await runCodexChatTurn({
+              bridge,
+              threadId,
+              threadTitle: thread.title,
+              input: content || "",
+              send,
+            });
+            accumulatedText = r.text;
+            for (const tu of r.toolUses) toolCallsPersisted.push({ name: tu.name, args: tu.args });
+            // Codex billing follows the user's ChatGPT plan; we don't
+            // count tokens here. Surface as a zero-cost LLM call so the
+            // trace dashboard still has a row.
+            emitter.emit("llm_call", { model: "codex/chatgpt", inputTokens: 0, outputTokens: 0, billing: "user-chatgpt-plan" });
+            if (r.errored) emitter.emit("error", { source: "codex", message: r.errorMessage || "codex turn failed" });
+            skipMainLoop = true;
+          }
+        }
 
         // Iterative tool-calling loop. Each iteration may produce text + zero or more tool_use blocks.
         let messages = anthropicMessages.slice();
@@ -340,7 +402,7 @@ Do not skip the planning step even if the request seems simple.`,
         // P29 — track per-iteration signature for loop detection.
         const iterHistory: Array<{ text: string; toolSig: string }> = [];
 
-        for (let iter = 0; iter < 6; iter++) {
+        for (let iter = 0; iter < 6 && !skipMainLoop; iter++) {
           // P32 — cooperative cancel. Operators can mark this run as
           // cancelled via Command Center; we check between iterations and
           // exit cleanly when we see the flag. The in-flight LLM stream

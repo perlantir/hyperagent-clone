@@ -21,6 +21,7 @@ import { encryptValue, decryptValue } from "../secrets";
 import {
   type CodexProviderMode,
   CODEX_PROVIDER_MODES,
+  normalizeProviderMode,
   type CodexBridgeConfig,
 } from "./types";
 
@@ -29,8 +30,10 @@ let _initialized = false;
 export async function ensureCodexSchema() {
   if (_initialized) return;
   await pool().query(`
-    -- Per-user provider mode. Default openaiApiKey for back-compat.
-    ALTER TABLE users ADD COLUMN IF NOT EXISTS "codexProviderMode" TEXT NOT NULL DEFAULT 'openaiApiKey';
+    -- Per-user provider mode. Default anthropicApiKey (the chat tool-loop
+    -- has historically used Claude). Legacy rows may carry
+    -- "openaiUserApiKey" — getProviderMode() normalizes those at read time.
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS "codexProviderMode" TEXT NOT NULL DEFAULT 'anthropicApiKey';
 
     -- Codex bridge connection. URL + capability token, both encrypted.
     -- Single row per user keyed on userId. Disconnect = DELETE.
@@ -54,9 +57,8 @@ export async function getProviderMode(userId: string): Promise<CodexProviderMode
     `SELECT "codexProviderMode" AS mode FROM users WHERE id=$1`,
     [userId],
   );
-  const v = r.rows[0]?.mode;
-  if (CODEX_PROVIDER_MODES.includes(v)) return v;
-  return "openaiApiKey";
+  // normalizeProviderMode handles legacy values + unknown-mode safety.
+  return normalizeProviderMode(r.rows[0]?.mode);
 }
 
 export async function setProviderMode(userId: string, mode: CodexProviderMode): Promise<void> {
