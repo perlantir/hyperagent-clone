@@ -64,7 +64,13 @@ function IntegrationsInner() {
         setTimeout(() => { clearInterval(poll); setConnecting(null); }, 5 * 60 * 1000);
       } else {
         setConnecting(null);
-        toast.error("Couldn't start connect flow", j.error || "No redirect URL returned.");
+        // P60 — surface the real reason and link the user to the auth-config
+        // dashboard when the failure is "no auth config for this toolkit".
+        const errMsg = j.error || "No redirect URL returned.";
+        const help = j.helpUrl
+          ? ` Open the dashboard: ${j.helpUrl}`
+          : "";
+        toast.error("Couldn't start connect flow", errMsg + help);
       }
     } catch (e: any) {
       setConnecting(null);
