@@ -4,6 +4,13 @@ import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
 
+interface AgentVersion {
+  id: string; agentId: string; version: number;
+  name: string; icon: string; color: string; description: string;
+  systemPrompt: string; tools: string[]; connectorIds: string[];
+  routerHint: string; createdAt: number; changedBy: string | null; changeNote: string | null;
+}
+
 export default function AgentPage({ params }: { params: { id: string } }) {
   const router = useRouter();
   const [a, setA] = useState<any>(null);
@@ -12,6 +19,14 @@ export default function AgentPage({ params }: { params: { id: string } }) {
   const [systemPrompt, setSystemPrompt] = useState(""); const [routerHint, setRouterHint] = useState("");
   const [tools, setTools] = useState<string[]>([]);
   const [allTools] = useState(["web_search","generate_artifact","slack_notify","slack_send_message","gmail_search","gmail_send","linear_search_issues","stripe_list_charges","github_search","airtable_list_records","notion_search","drive_search"]);
+  const [versions, setVersions] = useState<AgentVersion[]>([]);
+  const [showVersions, setShowVersions] = useState(false);
+  const [expandedVersion, setExpandedVersion] = useState<number | null>(null);
+
+  async function loadVersions() {
+    const j = await fetch(`/api/agents/${params.id}/versions`).then(r => r.json());
+    setVersions(j.versions || []);
+  }
 
   useEffect(() => {
     fetch(`/api/agents/${params.id}`).then(r => r.json()).then(j => {
@@ -20,6 +35,7 @@ export default function AgentPage({ params }: { params: { id: string } }) {
       setSystemPrompt(j.agent.systemPrompt); setRouterHint(j.agent.routerHint || "");
       setTools(j.agent.tools);
     });
+    loadVersions();
   }, [params.id]);
 
   async function save() {
@@ -29,11 +45,30 @@ export default function AgentPage({ params }: { params: { id: string } }) {
     });
     const j = await (await fetch(`/api/agents/${params.id}`)).json();
     setA(j.agent); setEditing(false);
+    loadVersions();
   }
   async function startThread() {
     const r = await fetch("/api/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ agentId: a.id, title: `Chat with ${a.name}` }) });
     const j = await r.json();
     router.push(`/threads/${j.thread.id}`);
+  }
+  async function rollback(version: number) {
+    if (!confirm(`Roll back to version ${version}? This creates a new version with the rolled-back state.`)) return;
+    const r = await fetch(`/api/agents/${params.id}/versions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ version }),
+    });
+    const j = await r.json();
+    if (j.ok) {
+      // Reload everything
+      const a = await fetch(`/api/agents/${params.id}`).then(r => r.json());
+      setA(a.agent); setName(a.agent.name); setDescription(a.agent.description);
+      setSystemPrompt(a.agent.systemPrompt); setRouterHint(a.agent.routerHint || "");
+      setTools(a.agent.tools);
+      loadVersions();
+    } else {
+      alert(j.error || "Rollback failed");
+    }
   }
 
   if (!a) return <AppShell><Topbar title="…" /></AppShell>;
@@ -51,12 +86,57 @@ export default function AgentPage({ params }: { params: { id: string } }) {
               <div style={{ color: "var(--text-muted)", fontSize: 14.5, maxWidth: 600 }}>{a.description}</div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn" onClick={() => { setShowVersions(!showVersions); if (!showVersions) loadVersions(); }}>
+                History {versions.length > 0 && <span style={{ marginLeft: 4, fontSize: 11, color: "var(--text-muted)" }}>({versions.length})</span>}
+              </button>
               <button className="btn" onClick={() => setEditing(!editing)}>{editing ? "Cancel" : "Edit"}</button>
               <button className="btn btn-primary" onClick={startThread}>+ New thread</button>
             </div>
           </div>
 
-          {!editing ? (
+          {showVersions ? (
+            <div style={{ paddingTop: 32 }}>
+              <div className="h-section" style={{ marginBottom: 12 }}>Version history · {versions.length}</div>
+              {versions.length === 0 ? (
+                <div style={{ padding: 32, color: "var(--text-muted)", fontSize: 13 }}>No version snapshots yet — edit the agent to start tracking history.</div>
+              ) : (
+                <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+                  {versions.map(v => (
+                    <div key={v.id} style={{ borderTop: "1px solid var(--border)" }}>
+                      <div onClick={() => setExpandedVersion(expandedVersion === v.version ? null : v.version)}
+                        style={{ padding: "12px 16px", cursor: "pointer", display: "flex", alignItems: "center", gap: 14 }}>
+                        <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 4, background: "var(--bg-subtle)", color: "var(--text-muted)" }}>v{v.version}</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5, fontWeight: 500, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{v.name}</div>
+                          {v.changeNote && <div style={{ fontSize: 11.5, color: "var(--text-muted)", marginTop: 2 }}>{v.changeNote}</div>}
+                        </div>
+                        <span style={{ fontSize: 11, color: "var(--text-faint)" }}>{new Date(v.createdAt).toLocaleString()}</span>
+                        <button className="btn" style={{ fontSize: 11, padding: "4px 10px" }}
+                          onClick={(e) => { e.stopPropagation(); rollback(v.version); }}>↺ Restore</button>
+                        <span style={{ fontSize: 10, opacity: 0.5, transform: expandedVersion === v.version ? "none" : "rotate(-90deg)" }}>▾</span>
+                      </div>
+                      {expandedVersion === v.version && (
+                        <div style={{ padding: "0 16px 16px", background: "var(--bg-subtle)" }}>
+                          <div style={{ paddingTop: 12 }}>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", letterSpacing: 0.5, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Description</div>
+                            <div style={{ fontSize: 13, marginBottom: 12 }}>{v.description}</div>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", letterSpacing: 0.5, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>System prompt</div>
+                            <pre style={{ fontSize: 12, fontFamily: "JetBrains Mono, monospace", whiteSpace: "pre-wrap", color: "var(--text-muted)", margin: 0, marginBottom: 12, lineHeight: 1.55, maxHeight: 240, overflow: "auto" }}>{v.systemPrompt}</pre>
+                            <div style={{ fontSize: 11, color: "var(--text-muted)", letterSpacing: 0.5, fontWeight: 600, textTransform: "uppercase", marginBottom: 4 }}>Tools</div>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {v.tools.map(t => (
+                                <span key={t} className="badge badge-gray" style={{ padding: "3px 8px", fontSize: 11 }}>⚙ {t}</span>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : !editing ? (
             <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 40, paddingTop: 32 }}>
               <div>
                 <div className="h-section">System prompt</div>

@@ -23,6 +23,7 @@ import { evaluateAllApplicable } from "@/lib/rubrics";
 import { recordFinding } from "@/lib/rubric-improvement";
 import { getEventsForRun } from "@/lib/traces";
 import { getWorkingDoc } from "@/lib/working-memory";
+import { getCurrentAgentVersion } from "@/lib/agent-versions";
 // Note: scheduler is now driven by Vercel Cron at /api/cron, no in-process loop.
 
 export const dynamic = "force-dynamic";
@@ -126,10 +127,15 @@ export async function POST(req: Request) {
   const emitter = new TraceEmitter(runId);
   // P28a hardening — attach run-wide metadata to every emitted event so trace
   // queries can filter/correlate without joining back to the run record.
+  // P28b — read the latest agent version snapshot number (or 0 if the agent
+  // hasn't been edited since versioning shipped). Tagged on every trace event
+  // so a "replay against current state" can show a precise diff between
+  // historical-version-N and current-version-M.
+  const agentVersionNum = agentId ? await getCurrentAgentVersion(agentId) : 0;
   emitter.setDefaultMetadata({
     promptFingerprint: compiled.fingerprint,
     agentId: agentId || null,
-    agentVersion: (agent as any)?.version || 1,
+    agentVersion: agentVersionNum,
     requestId: req.headers.get("x-request-id") || req.headers.get("x-vercel-id") || null,
   });
 

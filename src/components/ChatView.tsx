@@ -24,6 +24,18 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
+  // P28b — pre-fill the input from a #seed=... URL hash. Used by replay/fork
+  // flows so the user lands on the new thread with the original message
+  // staged in the composer (editable before re-sending).
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const m = window.location.hash.match(/^#seed=(.+)$/);
+    if (m) {
+      try { setInput(decodeURIComponent(m[1])); } catch {}
+      // Clear the hash so reload doesn't re-seed.
+      history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  }, [threadId]);
 
   async function send() {
     const text = input.trim();
