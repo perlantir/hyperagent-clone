@@ -35,6 +35,8 @@ import type { CodexBridgeConfig, ApprovalRequest } from "./types";
 import { getCodexThreadId, setCodexThreadId } from "./thread-map";
 import { createApproval, pollDecision, type ApprovalDecision } from "./approvals-store";
 import { createArtifact } from "../db";
+import { emitAuditLog } from "./audit-log";
+import { randomBytes } from "node:crypto";
 
 // P64 — connection mode for a single turn. Phase 1 = WebSocket bridge
 // the user pasted; Phase 2 = locally-spawned codex app-server over
@@ -55,6 +57,10 @@ export interface CodexTurnDispatchOptions {
   assistantMessageId: string;
   send: (event: any) => void;
   approvalTimeoutMs?: number;
+  // P66b — caller can shrink the safety net for smoke tests / unit
+  // tests. Default stays at 270 s for production paths so a real
+  // codex turn that's just thinking hard isn't killed prematurely.
+  turnTimeoutMs?: number;
 }
 
 export interface CodexTurnResult {
@@ -86,10 +92,24 @@ export async function runCodexTurn(opts: CodexTurnDispatchOptions): Promise<Code
     if (!opts.bridge) {
       throw new Error("runCodexTurn(mode=bridge) requires bridge config");
     }
+    // P64.2 — chat/route.ts may attach a pre-resolved IP via the
+    // __preResolvedAddress / __preResolvedFamily smuggle fields after
+    // it ran the DNS rebinding guard. We forward them straight to the
+    // AppServerClient so the WebSocket transport pins the TCP connect
+    // to the same IP. If those fields aren't set the transport falls
+    // back to its own DNS lookup (which on tunnel mode means a
+    // public-resolved name — already pre-validated upstream).
+    const smuggled = opts.bridge as any;
     client = new AppServerClient({
       url: opts.bridge.url,
       capabilityToken: opts.bridge.capabilityToken,
       capabilities: { experimentalApi: opts.bridge.experimentalApi },
+      preResolvedAddress: typeof smuggled.__preResolvedAddress === "string"
+        ? smuggled.__preResolvedAddress
+        : undefined,
+      preResolvedFamily: smuggled.__preResolvedFamily === 6 ? 6
+                       : smuggled.__preResolvedFamily === 4 ? 4
+                       : undefined,
     });
   } else {
     // Phase 2 — locally-spawned stdio process. We pass a custom
@@ -99,6 +119,28 @@ export async function runCodexTurn(opts: CodexTurnDispatchOptions): Promise<Code
     const transport = await createStdioTransport({});
     client = new AppServerClient({ transport });
   }
+
+  // P64.2 — Real codex emits approvals as server-initiated REQUESTS,
+  // not notifications. Install the legacy compat shim so the
+  // .on("approval/required") subscriber below sees the same shape it
+  // always did, while we transparently respond to the underlying
+  // JSON-RPC request when approvalRespond fires.
+  client.installApprovalBridge();
+
+  // P66b — audit emit. We synthesize a runId locally (chat-bridge
+  // doesn't take one as input today; P66d will pass it in). The id
+  // is opaque and short-lived; it's only used to correlate the
+  // run's lifecycle events in the audit log.
+  const auditRunId = `runlocal_${randomBytes(8).toString("hex")}`;
+  const auditProviderMode = mode === "bridge" ? "codexChatGPTBridge" : "codexChatGPTLocal";
+  await emitAuditLog({
+    userId: opts.userId,
+    providerMode: auditProviderMode,
+    runId: auditRunId,
+    event: "run/created",
+    severity: "info",
+    details: { threadId: opts.threadId, transport: mode },
+  });
 
   let text = "";
   const toolUses: { name: string; args: any; result?: string }[] = [];
@@ -118,15 +160,22 @@ export async function runCodexTurn(opts: CodexTurnDispatchOptions): Promise<Code
       opts.send({ type: "error", message: errorMessage });
     }
     resolveDone();
-  }, 270_000);
+  }, opts.turnTimeoutMs ?? 270_000);
 
   try {
     await client.connect();
 
     let codexThreadId = await getCodexThreadId(opts.threadId);
     if (!codexThreadId) {
-      const r = await client.threadStart({ title: opts.threadTitle || "HyperAgent thread" });
-      codexThreadId = r.threadId;
+      // P64.2 — real ThreadStartResponse is `{ thread: { id, ... }, model,
+      // modelProvider, cwd, ... }`. The earlier flat `{ threadId }` shape
+      // never existed in codex 0.130.0. We pull thread.id and ignore the
+      // other fields (forward-compat).
+      const r = await client.threadStart({});
+      codexThreadId = (r as any)?.thread?.id || (r as any)?.threadId;
+      if (!codexThreadId) {
+        throw new Error("codex thread/start did not return a thread id");
+      }
       await setCodexThreadId(opts.threadId, codexThreadId);
     }
 
@@ -146,6 +195,66 @@ export async function runCodexTurn(opts: CodexTurnDispatchOptions): Promise<Code
             opts.send({ type: "delta", text: delta });
           }
         }
+      }
+    });
+    // P66b.1 — Real codex 0.130.0 emits v2-shaped notifications, NOT
+    // the legacy `turn/itemAdded`/`turn/itemUpdated` names. Translate
+    // the v2 events into the same `text` accumulator + `delta` SSE
+    // shape the rest of the chat-bridge already uses. We accept BOTH
+    // shapes so the existing P59 test suite (which sends legacy
+    // names) keeps passing AND a real authenticated codex turn
+    // produces text in ChatView.
+    //
+    // Wire shape per /tmp/codex-ts/v2/AgentMessageDeltaNotification.ts:
+    //   { delta: string, itemId, ... }
+    // Reasoning text deltas are surfaced separately at the protocol
+    // level; we do NOT include them in the assistant text accumulator
+    // (they're internal "thinking" state). A future enhancement could
+    // route them to a separate SSE channel.
+    (client as any).on("item/agentMessage/delta", (params: any) => {
+      const delta = typeof params?.delta === "string" ? params.delta : "";
+      if (!delta) return;
+      text += delta;
+      opts.send({ type: "delta", text: delta });
+    });
+    // P66b.1 — `item/completed` is dispatched for every item kind
+    // (agent_message, tool_call, command_exec, file_change). We
+    // route it differently per itemType:
+    //
+    //   - agent_message → final assistant text (deduped against
+    //     streamed deltas so we don't double-render)
+    //   - tool_call / command_exec → tool_result event for ChatView
+    //     to render under the matching tool_use card
+    //   - other kinds → forwarded as a log so trace remains complete
+    (client as any).on("item/completed", (params: any) => {
+      const itemType = params?.itemType || params?.item?.type;
+      if (itemType === "agentMessage" || itemType === "agent_message") {
+        const finalText = typeof params?.text === "string"
+          ? params.text
+          : typeof params?.item?.text === "string"
+            ? params.item.text
+            : "";
+        if (!finalText) return;
+        // If the streamed deltas already cover the final text, skip.
+        if (finalText.length <= text.length) return;
+        const tail = finalText.slice(text.length);
+        if (tail) {
+          text += tail;
+          opts.send({ type: "delta", text: tail });
+        }
+        return;
+      }
+      if (itemType === "tool_call" || itemType === "command_exec" || itemType === "commandExec") {
+        const last = toolUses[toolUses.length - 1];
+        const output = typeof params?.output === "string"
+          ? params.output
+          : typeof params?.item?.output === "string"
+            ? params.item.output
+            : params?.item?.result ?? "";
+        const error = params?.error || params?.item?.error;
+        const result = error ? `Error: ${error}` : (typeof output === "string" ? output : JSON.stringify(output ?? ""));
+        if (last) last.result = result;
+        opts.send({ type: "tool_result", result });
       }
     });
     client.on("tool/call", ({ toolName, arguments: args }) => {
@@ -286,13 +395,106 @@ export async function runCodexTurn(opts: CodexTurnDispatchOptions): Promise<Code
       resolveDone();
     });
 
+    // P66b.1 — v2 turn lifecycle. Real codex 0.130.0 emits
+    // `turn/completed` (v2 ServerNotification.ts) instead of the
+    // legacy `turn/finished` name. We accept both. We also map
+    // `error` v2 notifications onto our error-message channel so
+    // codex-side run failures surface in the chat UI.
+    (client as any).on("turn/completed", (params: any) => {
+      // The v2 shape carries the full Turn record including
+      // tokenUsage / endedAt / status. We use the presence of the
+      // notification as the signal that the run is over; the chat
+      // bridge doesn't render usage today (P59 trace store does).
+      void params;
+      clearTimeout(turnTimeout);
+      resolveDone();
+    });
+
+    // P66b.1 — v2 server-side error notifications.
+    (client as any).on("error", (params: any) => {
+      const msg = typeof params?.message === "string"
+        ? params.message
+        : typeof params?.error?.message === "string"
+          ? params.error.message
+          : "codex emitted an error notification";
+      // We don't auto-fail the turn on every error notification —
+      // codex sometimes emits warnings via this channel. We surface
+      // it as a log so the user sees it without halting the run.
+      opts.send({ type: "log", level: "error", message: msg });
+    });
+
+    // P66b.1 — v2 tool / command lifecycle. Codex 0.130.0 represents
+    // tool calls as items (item/started + item/agentMessage/delta +
+    // item/completed) where itemType reflects the kind. Map the
+    // tool-shaped variants onto our existing tool_use / tool_result
+    // SSE events so the ChatView UI renders them identically to the
+    // legacy `tool/call` + `tool/result` path.
+    (client as any).on("item/started", (params: any) => {
+      const itemType = params?.itemType || params?.item?.type;
+      if (itemType === "tool_call" || itemType === "command_exec" || itemType === "commandExec") {
+        const name = params?.toolName || params?.item?.toolName || params?.item?.commandName || "tool";
+        const input = params?.arguments ?? params?.item?.arguments ?? params?.item?.command ?? {};
+        toolUses.push({ name, args: input });
+        opts.send({ type: "tool_use", name, args: input });
+      }
+    });
+
+    (client as any).on("item/commandExecution/outputDelta", (params: any) => {
+      // Stream stdout/stderr from a v2 command_exec item back to the
+      // UI as a log line. Don't accumulate into `text` — that's the
+      // assistant message channel.
+      const stream = params?.stream || params?.outputStream || "stdout";
+      const chunk = params?.delta || params?.text || "";
+      if (chunk) {
+        opts.send({ type: "log", level: stream === "stderr" ? "warn" : "info", message: String(chunk).slice(0, 1000) });
+      }
+    });
+
+    // P66b.1 — v2 file-change lifecycle (codex 0.130.0 ServerNotification
+    // shapes: item/fileChange/patchUpdated and item/fileChange/outputDelta).
+    // We promote a completed file change to the same artifact shape the
+    // legacy `file/changeRequested` handler produced.
+    (client as any).on("item/fileChange/patchUpdated", async (params: any) => {
+      const path = params?.path || params?.filePath || params?.item?.path;
+      const diff = params?.unifiedDiff || params?.patch || params?.diff;
+      if (!path) return;
+      opts.send({ type: "tool_use", name: "edit_file", args: { path, diff } });
+      try {
+        const a = await createArtifact({
+          threadId: opts.threadId,
+          messageId: opts.assistantMessageId,
+          type: "document",
+          title: `Edit: ${path}`,
+          body: `\`\`\`diff\n${typeof diff === "string" ? diff : "(no diff)"}\n\`\`\``,
+        });
+        artifactIds.push(a.id);
+        opts.send({ type: "artifact", artifactId: a.id });
+      } catch (e: any) {
+        opts.send({ type: "log", level: "warn", message: `edit_file artifact failed: ${e?.message || e}` });
+      }
+    });
+
     client.on("log", ({ level, message }) => {
       if (level === "warn" || level === "error") {
         opts.send({ type: "log", level, message });
       }
     });
 
-    await client.turnStart({ threadId: codexThreadId, input: opts.input });
+    // P64.2 — real TurnStartParams.input is `Array<UserInput>` (each
+    // element is `{ type: "text", text, text_elements }` for plain
+    // text). We always wrap the inbound string into a single text item;
+    // multi-modal attachments will get added in a follow-up alongside
+    // the v2 attachment shapes (image / localImage / mention / skill).
+    await client.turnStart({
+      threadId: codexThreadId,
+      input: [
+        {
+          type: "text",
+          text: typeof opts.input === "string" ? opts.input : String(opts.input ?? ""),
+          text_elements: [],
+        },
+      ],
+    });
     await done;
   } catch (e: any) {
     errored = true;
@@ -302,6 +504,28 @@ export async function runCodexTurn(opts: CodexTurnDispatchOptions): Promise<Code
     clearTimeout(turnTimeout);
     await client.close().catch(() => {});
   }
+
+  // P66b — audit emit on completion. We summarise the outcome only;
+  // the actual events are stored in codex_run_events via P65.1's
+  // event-mirror (or in P66d's server-authoritative path).
+  await emitAuditLog({
+    userId: opts.userId,
+    providerMode: auditProviderMode,
+    runId: auditRunId,
+    event: errored ? "run/failed" : "run/completed",
+    severity: errored ? "error" : "info",
+    details: {
+      threadId: opts.threadId,
+      transport: mode,
+      approvalCount,
+      // errorMessage is already redacted by AppServerClient before it
+      // reaches us, but emitAuditLog redacts again as defense in depth.
+      errorMessage: errored ? errorMessage : undefined,
+      textLength: text.length,
+      toolCount: toolUses.length,
+      artifactCount: artifactIds.length,
+    },
+  });
 
   return { text, toolUses, artifactIds, approvalCount, errored, errorMessage };
 }

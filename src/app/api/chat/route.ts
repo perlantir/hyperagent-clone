@@ -433,7 +433,16 @@ Do not skip the planning step even if the request seems simple.`,
                   try { host = new URL(bridge.url).hostname.replace(/^\[|\]$/g, ""); } catch {}
                   if (host) {
                     const dns = await verifyResolvedIp(host);
-                    if (!dns.ok) codexErr = dns.reason;
+                    if (!dns.ok) {
+                      codexErr = dns.reason;
+                    } else {
+                      // P64.2 — pin the IP we just validated through to
+                      // the dispatch path so the WS transport doesn't
+                      // re-resolve and land on a different (private)
+                      // address.
+                      (bridge as any).__preResolvedAddress = dns.address;
+                      (bridge as any).__preResolvedFamily = dns.family;
+                    }
                   }
                 }
               }

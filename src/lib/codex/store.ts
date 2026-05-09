@@ -29,6 +29,7 @@ import {
   validateForServerSideFetch,
   validateForBrowserOrLocal,
   inferConnectionLocationFromUrl,
+  validateTokenEntropy,
 } from "./url-safety";
 
 let _initialized = false;
@@ -153,13 +154,20 @@ export async function setBridgeConfig(
     if (!r.ok) throw new Error(r.reason);
   }
 
-  if (!cfg.capabilityToken || cfg.capabilityToken.length < 16) {
-    throw new Error("Capability token must be at least 16 characters");
+  // P64.2 — strengthened entropy gate. Capability token is matched by
+  // SHA-256 on the bridge side; the only thing protecting the bridge is
+  // raw token entropy, so we enforce a per-mode minimum:
+  //   browser      ≥ 96 bits  (~24 hex chars)
+  //   local-server ≥ 96 bits
+  //   tunnel       ≥ 192 bits (~48 hex chars) — public internet exposure
+  // The recommended setup uses 256-bit (64-hex) tokens; the in-app
+  // generator now produces those by default.
+  if (!cfg.capabilityToken) {
+    throw new Error("Capability token is required");
   }
-  // For tunnel mode the token is exposed over the public internet, so
-  // we additionally require a stronger minimum.
-  if (loc === "tunnel" && cfg.capabilityToken.length < 32) {
-    throw new Error("Tunnel mode requires a capability token of at least 32 characters.");
+  const entropyCheck = validateTokenEntropy(cfg.capabilityToken, loc);
+  if (!entropyCheck.ok) {
+    throw new Error(entropyCheck.reason);
   }
 
   const now = Date.now();
