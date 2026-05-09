@@ -3,11 +3,13 @@ import { getCurrentUser } from "@/lib/auth";
 import { getThread } from "@/lib/db";
 import { AppShell } from "@/components/AppShell";
 import { Topbar } from "@/components/Topbar";
-import { ChatView } from "@/components/ChatView";
 import { LiveblocksRoom } from "@/components/LiveblocksRoom";
 import { PresenceAvatars } from "@/components/PresenceAvatars";
-import { PlanTasks } from "@/components/PlanTasks";
 import { SaveAsAgentButton } from "@/components/SaveAsAgentButton";
+import { ThreadWorkspace } from "@/components/ThreadWorkspace";
+
+// P37 — Two-column workspace: ChatView on the left, Canvas on the right.
+// Canvas auto-opens on first artifact emit; user can toggle + resize.
 
 export default async function ThreadPage({ params }: { params: { id: string } }) {
   const user = await getCurrentUser();
@@ -32,13 +34,7 @@ export default async function ThreadPage({ params }: { params: { id: string } })
             </div>
           }
         />
-        <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
-          {/* P24 — live Plan Tasks panel; renders nothing until the agent populates the working doc */}
-          <div style={{ padding: "0 16px", paddingTop: 12 }}>
-            <PlanTasks threadId={thread.id} />
-          </div>
-          <ChatView threadId={thread.id} agentId={thread.agentId} />
-        </div>
+        <ThreadWorkspace threadId={thread.id} agentId={thread.agentId} />
       </LiveblocksRoom>
     </AppShell>
   );
