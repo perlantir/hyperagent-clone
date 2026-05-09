@@ -19,6 +19,7 @@ import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { createArtifact, createMessage, getThread, updateThread } from "@/lib/db";
 import type { MessageAttachment } from "@/lib/types";
+import { redactSecrets } from "@/lib/security";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -69,7 +70,12 @@ export async function POST(req: Request) {
 
     if (isText) {
       const text = buf.toString("utf-8");
-      const preview = text.slice(0, TEXT_PREVIEW_BYTES);
+      const rawPreview = text.slice(0, TEXT_PREVIEW_BYTES);
+      // P33b — strip API keys / secrets from the preview before persistence.
+      // A user pasting a config file shouldn't unwittingly send their
+      // production secrets to the model; the redactor leaves a [REDACTED:provider]
+      // marker so the model still understands the file's structure.
+      const preview = redactSecrets(rawPreview);
       const att: MessageAttachment = {
         kind: "file",
         name: file.name,

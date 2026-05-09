@@ -46,6 +46,10 @@ let _initialized = false;
 let _dlqCount = 0;        // in-process counter for monitoring DLQ writes
 let _stderrCount = 0;     // in-process counter for monitoring last-ditch writes
 
+// Exported so read-only callers (audit query endpoint) can ensure the
+// table exists before running SELECT on a fresh deployment.
+export async function ensureAuditSchema() { return ensureSchema(); }
+
 async function ensureSchema() {
   if (_initialized) return;
   await pool().query(`

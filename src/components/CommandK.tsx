@@ -17,6 +17,7 @@ const STATIC_PAGES: SearchItem[] = [
   { type: "page", id: "integrations",   title: "Integrations",   subtitle: "Connectors",               href: "/integrations" },
   { type: "page", id: "live",           title: "Live mode",      subtitle: "Automations",              href: "/live" },
   { type: "page", id: "command-center", title: "Command Center", subtitle: "Live ops dashboard",       href: "/command-center" },
+  { type: "page", id: "audit",          title: "Audit log",      subtitle: "Security + ops events",    href: "/audit" },
   { type: "page", id: "costs",          title: "Costs",          subtitle: "Per-run + per-agent",      href: "/costs" },
   { type: "page", id: "billing",        title: "Billing",        subtitle: "Credits + top-up",         href: "/billing" },
   { type: "page", id: "settings",       title: "Settings",       subtitle: "Account + model",          href: "/settings" },
