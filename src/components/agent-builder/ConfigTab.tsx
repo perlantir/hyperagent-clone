@@ -8,6 +8,7 @@ import { useState, useEffect } from "react";
 import { useToast } from "@/components/Toast";
 import type { AgentLike } from "./types";
 import { CLAUDE_MODEL_VARIANTS } from "./types";
+import { MODELS, modelsByProvider } from "@/lib/models";
 
 const COLORS: Array<{ id: "orange" | "blue" | "green" | "purple"; gradient: string }> = [
   { id: "orange", gradient: "linear-gradient(135deg,#c2410c,#f97316)" },
@@ -195,10 +196,35 @@ export function ConfigTab({ agent, onSave }: {
                     background: "var(--bg)", color: "var(--text)", fontSize: 13,
                   }}>
                   <option value="">Account default (settings)</option>
-                  {CLAUDE_MODEL_VARIANTS.map(m => (
-                    <option key={m.id} value={m.id}>{m.label} — {m.sub}</option>
-                  ))}
+                  {(() => {
+                    // P54 — show all providers grouped. The Anthropic block
+                    // keeps the rich variant labels (CLAUDE_MODEL_VARIANTS);
+                    // OpenAI / Google use the canonical model labels.
+                    const groups = modelsByProvider();
+                    return (
+                      <>
+                        <optgroup label="Anthropic (Claude)">
+                          {CLAUDE_MODEL_VARIANTS.map(m => (
+                            <option key={m.id} value={m.id}>{m.label} — {m.sub}</option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="OpenAI">
+                          {groups.openai.map(m => (
+                            <option key={m.id} value={m.id}>{m.label}</option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Google Gemini">
+                          {groups.google.map(m => (
+                            <option key={m.id} value={m.id}>{m.label}</option>
+                          ))}
+                        </optgroup>
+                      </>
+                    );
+                  })()}
                 </select>
+                <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 8, lineHeight: 1.5 }}>
+                  Selecting a non-Anthropic model requires a corresponding API key in <a href="/settings#api-keys" style={{ color: "var(--accent)" }}>Settings → API Keys</a>.
+                </div>
               </div>
             </div>
           </div>
@@ -251,11 +277,11 @@ export function ConfigTab({ agent, onSave }: {
                 style={{
                   padding: "7px 10px", borderRadius: 6,
                   border: "1px solid var(--border)", background: "var(--bg)",
-                  color: "var(--text)", fontSize: 12.5, minWidth: 160,
+                  color: "var(--text)", fontSize: 12.5, minWidth: 200,
                 }}>
                 <option value="">Default (Sonnet)</option>
-                {CLAUDE_MODEL_VARIANTS.map(m => (
-                  <option key={m.id} value={m.id}>{m.label}</option>
+                {MODELS.map(m => (
+                  <option key={m.id} value={m.id}>{m.label} ({m.provider})</option>
                 ))}
               </select>
             </div>

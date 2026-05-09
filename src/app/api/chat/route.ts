@@ -375,7 +375,17 @@ Do not skip the planning step even if the request seems simple.`,
           // account-default. The string is validated by Anthropic's API
           // (we don't gate on a known list here so newly-added variants
           // work without code changes).
-          const effectiveModel = (agent as any)?.modelId || DEFAULT_MODEL;
+          //
+          // P54 — the chat tool-loop uses Anthropic-specific streaming +
+          // cache_control breakpoints. Non-Anthropic models selected from
+          // the broader picker fall back to DEFAULT_MODEL with a console
+          // warning rather than failing in a confusing way. The future
+          // multi-provider chat path goes through llm-providers.streamChat.
+          let effectiveModel: string = (agent as any)?.modelId || DEFAULT_MODEL;
+          if (effectiveModel && !effectiveModel.startsWith("claude-")) {
+            console.warn(`[chat] agent.modelId=${effectiveModel} is non-Anthropic; falling back to ${DEFAULT_MODEL} for the chat tool-loop`);
+            effectiveModel = DEFAULT_MODEL;
+          }
           const stream2 = ant.messages.stream({
             model: effectiveModel,
             max_tokens: 2048,
