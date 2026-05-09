@@ -93,14 +93,37 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
     const el = messagesRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
-  // P28b — pre-fill the input from a #seed=... URL hash.
+  // P28b + P62 — pre-fill the composer from URL hash params.
+  // Supports both legacy #seed=<text> and the newer query-string form
+  // #seed=<text>&runMode=plan_first&autosend=1 used by the home
+  // composer to start a turn the moment the user lands on the new
+  // thread page.
   useEffect(() => {
     if (typeof window === "undefined") return;
-    const m = window.location.hash.match(/^#seed=(.+)$/);
-    if (m) {
-      try { setInput(decodeURIComponent(m[1])); } catch {}
-      history.replaceState(null, "", window.location.pathname + window.location.search);
+    const raw = window.location.hash.replace(/^#/, "");
+    if (!raw) return;
+    let seed = "";
+    let mode: RunMode | null = null;
+    let auto = false;
+    if (raw.startsWith("seed=") && !raw.includes("&")) {
+      // Legacy single-key form.
+      try { seed = decodeURIComponent(raw.slice(5)); } catch {}
+    } else {
+      const params = new URLSearchParams(raw);
+      try { seed = params.get("seed") || ""; } catch {}
+      const m = params.get("runMode");
+      if (m === "plan_first" || m === "execute") mode = m;
+      auto = params.get("autosend") === "1";
     }
+    if (seed) setInput(seed);
+    if (mode) setRunMode(mode);
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+    // If the home composer flagged autosend, fire the send a tick later
+    // so React commits the input + runMode state first.
+    if (auto && seed) {
+      setTimeout(() => { try { send(); } catch {} }, 50);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadId]);
 
   // P31 — upload a file and stage it as a pending attachment. Routes to

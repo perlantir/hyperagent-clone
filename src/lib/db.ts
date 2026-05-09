@@ -701,6 +701,34 @@ export async function createSkill(s: Omit<Skill,"id"|"createdAt">): Promise<Skil
 export async function deleteSkill(id: string, userId: string) {
   await q(`DELETE FROM skills WHERE id=$1 AND "userId"=$2`, [id, userId]);
 }
+// P63 — edit user-owned skills (templates are read-only).
+export async function updateSkill(
+  id: string,
+  userId: string,
+  fields: Partial<Pick<Skill, "name" | "description" | "category" | "systemPromptAddition" | "toolHints">>,
+): Promise<Skill | null> {
+  const existing = await qOne<any>(`SELECT * FROM skills WHERE id=$1 AND "userId"=$2`, [id, userId]);
+  if (!existing) return null;
+  const patch = {
+    name:                  fields.name                  ?? existing.name,
+    description:           fields.description           ?? existing.description,
+    category:              fields.category              ?? existing.category,
+    systemPromptAddition:  fields.systemPromptAddition  ?? existing.systemPromptAddition,
+    toolHints:             fields.toolHints             ?? (existing.toolHints ? JSON.parse(existing.toolHints) : []),
+  };
+  await q(
+    `UPDATE skills
+        SET name=$1, description=$2, category=$3,
+            "systemPromptAddition"=$4, "toolHints"=$5
+      WHERE id=$6 AND "userId"=$7`,
+    [
+      patch.name, patch.description, patch.category,
+      patch.systemPromptAddition, JSON.stringify(patch.toolHints),
+      id, userId,
+    ],
+  );
+  return { ...existing, ...patch, toolHints: patch.toolHints } as Skill;
+}
 
 // CREDITS
 export async function getCreditBalance(userId: string): Promise<number> {

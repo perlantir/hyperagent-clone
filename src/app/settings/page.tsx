@@ -19,6 +19,7 @@ import { SandboxPolicyPanel } from "@/components/SandboxPolicyPanel";
 import { ApiKeysPanel } from "@/components/ApiKeysPanel";
 import { SettingsNav, SETTINGS_SECTIONS } from "@/components/settings/SettingsNav";
 import { CodexSection } from "@/components/settings/CodexSection";
+import { ManusImportSection } from "@/components/settings/ManusImportSection";
 import {
   ProfileSection, PersonalizationSection, NotificationsSection,
   SecuritySection, ReferralsSection,
@@ -251,6 +252,9 @@ export default function SettingsPage() {
 
             {/* P57 — Codex / OpenAI provider mode + ChatGPT Sign-In experimental flow. */}
             {active === "codex" && <CodexSection />}
+
+            {/* P63 — Manus Import: bring prior Manus conversations into Hyperagent. */}
+            {active === "manus-import" && <ManusImportSection />}
 
             {active === "sandbox" && (
               <div>

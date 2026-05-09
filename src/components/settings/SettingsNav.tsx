@@ -16,6 +16,7 @@ export const SETTINGS_SECTIONS: SectionDef[] = [
   { id: "profile",         label: "Profile",         description: "Display name and how you appear.",                icon: "👤" },
   { id: "personalization", label: "Personalization", description: "Company, role, and preferences.",                 icon: "⚙" },
   { id: "integrations",    label: "Integrations",    description: "OAuth to 250+ third-party services.",            icon: "⊟" },
+  { id: "manus-import",    label: "Manus Import",    description: "Bring your Manus conversations into Hyperagent.", icon: "↥" },
   { id: "models",          label: "Models",          description: "Default chat / image / video / TTS providers.",   icon: "✶" },
   { id: "api-keys",        label: "API Keys",        description: "Public hak_ keys + bring-your-own provider keys.", icon: "🔑" },
   { id: "codex",           label: "Codex / OpenAI",  description: "Provider mode + ChatGPT Sign-In (experimental).",  icon: "◈" },
