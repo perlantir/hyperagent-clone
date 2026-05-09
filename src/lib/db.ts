@@ -46,6 +46,9 @@ async function initSchema() {
     -- P31 — multi-modal attachments JSON column on messages. Stores an array
     -- of { kind, name, contentType, size, dataUrl?, artifactId?, textPreview? }.
     ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachments TEXT;
+    -- P44 — soft-delete (archive) for artifacts so library bulk operations
+    -- can hide without losing version history.
+    ALTER TABLE artifacts ADD COLUMN IF NOT EXISTS "archivedAt" BIGINT;
     -- P36 — per-agent overrides for builder tabs.
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS "modelId" TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS "subagentModelId" TEXT;
@@ -416,7 +419,7 @@ export async function createArtifact(a: Omit<Artifact,"id"|"createdAt">): Promis
 export async function getArtifact(id: string): Promise<Artifact | null> {
   return qOne(`SELECT * FROM artifacts WHERE id=$1`, [id]);
 }
-export async function listArtifactsForUser(userId: string, opts: { agentId?: string | null; projectId?: string | null } = {}): Promise<(Artifact & { agentId?: string | null; agentName?: string | null; projectId?: string | null })[]> {
+export async function listArtifactsForUser(userId: string, opts: { agentId?: string | null; projectId?: string | null; includeArchived?: boolean } = {}): Promise<(Artifact & { agentId?: string | null; agentName?: string | null; projectId?: string | null; archivedAt?: number | null })[]> {
   await ensureInit();
   const conds: string[] = [`t."userId"=$1`];
   const vals: any[] = [userId];
@@ -428,6 +431,9 @@ export async function listArtifactsForUser(userId: string, opts: { agentId?: str
     if (opts.projectId === null) conds.push(`t."projectId" IS NULL`);
     else { vals.push(opts.projectId); conds.push(`t."projectId"=$${vals.length}`); }
   }
+  // P44 — archived artifacts hidden by default. Library passes
+  // includeArchived for the "Show archived" filter chip.
+  if (!opts.includeArchived) conds.push(`a."archivedAt" IS NULL`);
   const rows = await pool().query(
     `SELECT a.*, t."agentId", t."projectId", ag.name as "agentName"
      FROM artifacts a
@@ -438,6 +444,22 @@ export async function listArtifactsForUser(userId: string, opts: { agentId?: str
     vals,
   );
   return rows.rows;
+}
+
+// P44 — bulk archive/unarchive. Cascade-archive scoped to the user's
+// own artifacts. Returns the number of rows touched.
+export async function archiveArtifacts(ids: string[], userId: string, archive: boolean): Promise<number> {
+  if (ids.length === 0) return 0;
+  await ensureInit();
+  const r = await pool().query(
+    `UPDATE artifacts a SET "archivedAt"=$3
+     FROM threads t
+     WHERE a.id = ANY($1::text[])
+       AND a."threadId" = t.id
+       AND t."userId" = $2`,
+    [ids, userId, archive ? Date.now() : null],
+  );
+  return r.rowCount || 0;
 }
 
 // P31b — Snapshot the current artifact body to artifact_versions and write

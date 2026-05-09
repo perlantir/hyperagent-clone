@@ -91,7 +91,22 @@ export default function AuditPage() {
       <Topbar title="Audit log" />
       <div style={{ overflowY: "auto", padding: "32px 48px" }}>
         <div style={{ maxWidth: 1100, margin: "0 auto" }}>
-          <h1 className="h-display" style={{ fontSize: 44, marginBottom: 8 }}>Audit log</h1>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, marginBottom: 8 }}>
+            <h1 className="h-display" style={{ fontSize: 44 }}>Audit log</h1>
+            {/* P44 — Export the currently-filtered set as CSV. Re-uses the
+                same query params; format=csv triggers the streaming download. */}
+            <button className="btn" style={{ fontSize: 12, padding: "6px 14px" }}
+              onClick={() => {
+                const params = new URLSearchParams({ limit: "200", format: "csv" });
+                if (filterAction !== "all") params.set("action", filterAction);
+                if (filterResult !== "all") params.set("result", filterResult);
+                if (fromTs) params.set("from", String(fromTs));
+                if (searchResource.trim()) params.set("resource", searchResource.trim());
+                window.location.href = `/api/audit?${params}`;
+              }}>
+              ↓ Export CSV
+            </button>
+          </div>
           <div style={{ color: "var(--text-muted)", fontSize: 15, marginBottom: 24, maxWidth: 640 }}>
             Append-only record of security-relevant actions: auth events, secret writes, agent edits, run cancellations, and more. Scoped to your account plus system-level events.
           </div>

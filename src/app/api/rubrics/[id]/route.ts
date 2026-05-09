@@ -2,7 +2,7 @@
 
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
-import { getRubric } from "@/lib/rubrics";
+import { getRubric, bindRubricToAgent } from "@/lib/rubrics";
 import { pool } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -55,7 +55,14 @@ export async function PATCH(req: Request, { params }: { params: { id: string } }
     return NextResponse.json(await getRubric(params.id, user.id));
   }
 
-  return NextResponse.json({ error: "action must be pin | unpin | update" }, { status: 400 });
+  // P44 — bind rubric to a specific agent (clones built-ins).
+  if (action === "bind_agent") {
+    const r = await bindRubricToAgent(params.id, user.id, body.agentId || null);
+    if (!r.ok) return NextResponse.json({ error: "could not bind rubric" }, { status: 400 });
+    return NextResponse.json({ rubric: r.rubric });
+  }
+
+  return NextResponse.json({ error: "action must be pin | unpin | update | bind_agent" }, { status: 400 });
 }
 
 export async function DELETE(_req: Request, { params }: { params: { id: string } }) {

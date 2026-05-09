@@ -140,6 +140,27 @@ export async function listRubrics(userId: string): Promise<RubricRow[]> {
   return r.rows.map(parseRubricRow);
 }
 
+// P44 — rubrics applicable to a specific agent. Includes:
+//   - global / built-in rubrics (always)
+//   - user-scoped rubrics (scope='user' AND userId match) — same as today
+//   - agent-scoped rubrics (scope='agent' AND scopeId = agentId)
+//
+// listRubrics for the agent builder UI; listApplicableRubrics for runtime
+// evaluation. The runtime path filters by isPinned for auto-eval; the
+// builder UI shows everything so users can pin/unpin per-agent.
+export async function listApplicableRubrics(userId: string, agentId: string | null): Promise<RubricRow[]> {
+  await ensureSchema();
+  const r = await pool().query(`
+    SELECT * FROM rubrics
+    WHERE ("isBuiltin" = TRUE)
+       OR ("userId" = $1 AND scope = 'user')
+       OR ("userId" = $1 AND scope = 'global')
+       OR ($2::text IS NOT NULL AND "userId" = $1 AND scope = 'agent' AND "scopeId" = $2::text)
+    ORDER BY "isPinned" DESC, "isBuiltin" DESC, name ASC
+  `, [userId, agentId]);
+  return r.rows.map(parseRubricRow);
+}
+
 export async function getRubric(id: string, userId: string): Promise<RubricRow | null> {
   await ensureSchema();
   const r = await pool().query(`
@@ -315,7 +336,10 @@ export async function evaluateAllApplicable(
   baseInput: Omit<EvalInput, "rubric">,
 ): Promise<EvalResult[]> {
   await ensureSchema();
-  const all = await listRubrics(baseInput.userId);
+  // P44 — narrow to rubrics scoped to this agent (or global) instead of
+  // every rubric the user has access to. Per-agent binding lets users
+  // attach a rubric to a single agent without polluting other agents.
+  const all = await listApplicableRubrics(baseInput.userId, baseInput.agentId);
   const applicable = all.filter(r => r.isPinned);  // only pinned rubrics auto-eval
   const results: EvalResult[] = [];
   for (const rubric of applicable) {
@@ -326,6 +350,47 @@ export async function evaluateAllApplicable(
     }
   }
   return results;
+}
+
+// P44 — Bind / unbind a rubric to an agent. Mutates rubric.scope +
+// scopeId in place. Auth: rubric must belong to the user (built-in or
+// user-scoped). Built-in rubrics can be agent-bound by *cloning* —
+// agents typically need to scope a built-in like "Production-Grade" to
+// just one focused agent.
+export async function bindRubricToAgent(
+  rubricId: string, userId: string, agentId: string | null,
+): Promise<{ ok: boolean; rubric?: RubricRow }> {
+  await ensureSchema();
+  const r = await pool().query(
+    `SELECT * FROM rubrics WHERE id=$1 AND ("userId"=$2 OR "isBuiltin"=TRUE)`,
+    [rubricId, userId],
+  );
+  if (!r.rows[0]) return { ok: false };
+  // For built-in rubrics, clone instead of mutating — multiple users
+  // share built-ins so we mustn't tie one user's binding to a global row.
+  if (r.rows[0].isBuiltin) {
+    if (agentId === null) return { ok: false };
+    const cloneId = "rb_" + (await import("node:crypto")).randomBytes(8).toString("hex");
+    const orig = r.rows[0];
+    await pool().query(
+      `INSERT INTO rubrics (id, "userId", name, description, scope, "scopeId", version, "isBuiltin", "isPinned", criteria, "passingThreshold", "judgePassingScore", "judgeModel", "judgePromptVersion", "createdAt", "updatedAt")
+       VALUES ($1,$2,$3,$4,'agent',$5,1,FALSE,FALSE,$6,$7,$8,$9,$10,$11,$11)`,
+      [cloneId, userId, `${orig.name} (cloned)`, orig.description, agentId, orig.criteria,
+       orig.passingThreshold, orig.judgePassingScore, orig.judgeModel, orig.judgePromptVersion, Date.now()],
+    );
+    const cloned = await pool().query(`SELECT * FROM rubrics WHERE id=$1`, [cloneId]);
+    return { ok: true, rubric: parseRubricRow(cloned.rows[0]) };
+  }
+  // User-scoped: mutate scope + scopeId.
+  const next = agentId
+    ? { scope: "agent", scopeId: agentId }
+    : { scope: "user", scopeId: null };
+  await pool().query(
+    `UPDATE rubrics SET scope=$1, "scopeId"=$2, "updatedAt"=$3 WHERE id=$4`,
+    [next.scope, next.scopeId, Date.now(), rubricId],
+  );
+  const updated = await pool().query(`SELECT * FROM rubrics WHERE id=$1`, [rubricId]);
+  return { ok: true, rubric: parseRubricRow(updated.rows[0]) };
 }
 
 export async function listEvaluationsForRun(runId: string, userId: string): Promise<any[]> {

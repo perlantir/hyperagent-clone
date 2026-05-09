@@ -17,6 +17,10 @@ interface Msg {
   id?: string; role: "user" | "assistant"; content: string;
   toolCalls?: any[]; artifactIds?: string[]; attachments?: Attachment[];
   streaming?: boolean; costCredits?: number; runId?: string;
+  // P44 — flagged when the user sent runMode=plan_first; surfaces the
+  // approve/edit/reject controls under the assistant's plan summary.
+  wasPlanFirst?: boolean;
+  planResolved?: boolean;
 }
 
 export function ChatView({ threadId, agentId }: { threadId: string; agentId: string | null }) {
@@ -192,7 +196,15 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
           } else if (ev.type === "router") {
             setRouterNote(ev.reason);
           } else if (ev.type === "done") {
-            setMessages(m => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], streaming: false, costCredits: ev.costCredits, runId: ev.runId }; return c; });
+            // P44 — tag the just-completed assistant message as a plan
+            // summary if this turn was plan-first. The flag drives the
+            // Approve / Edit / Reject controls in MessageView.
+            const wasPlanFirst = runMode === "plan_first";
+            setMessages(m => {
+              const c = [...m];
+              c[c.length - 1] = { ...c[c.length - 1], streaming: false, costCredits: ev.costCredits, runId: ev.runId, wasPlanFirst };
+              return c;
+            });
             // P38 — capture the completed runId so RunModeMenu actions
             // (Run eval / Give feedback) have a target. Plan-first auto-
             // resets to execute so the user's next turn runs normally.
@@ -229,6 +241,21 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
       try { await fetch(`/api/runs/${activeRunId}/cancel`, { method: "POST" }); }
       catch (e) { /* best effort */ }
     }
+  }
+
+  // P44 — Plan approval. After a plan-first turn lands, the user can
+  // approve (sends "go" with runMode=execute), or reject (just hides the
+  // controls). Edit isn't a separate action — the user can simply type a
+  // new message that revises the plan.
+  async function approvePlan(index: number) {
+    setMessages(m => { const c = [...m]; c[index] = { ...c[index], planResolved: true }; return c; });
+    setRunMode("execute");
+    setInput("go");
+    // Slight delay so React commits the input before send reads it
+    setTimeout(() => send(), 30);
+  }
+  function rejectPlan(index: number) {
+    setMessages(m => { const c = [...m]; c[index] = { ...c[index], planResolved: true }; return c; });
   }
 
   return (
@@ -276,7 +303,12 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
               ◆ Router picked an agent — {routerNote}
             </div>
           )}
-          {messages.map((m, i) => <MessageView key={i} m={m} />)}
+          {messages.map((m, i) => (
+            <MessageView key={i} m={m}
+              onApprovePlan={() => approvePlan(i)}
+              onRejectPlan={() => rejectPlan(i)}
+            />
+          ))}
         </div>
       </div>
       <div style={{ padding: "0 32px 24px", maxWidth: 760, width: "100%", margin: "0 auto", flexShrink: 0 }}>
@@ -393,7 +425,11 @@ function AttachmentPill({ a, onRemove }: { a: Attachment; onRemove: () => void }
   );
 }
 
-function MessageView({ m }: { m: Msg }) {
+function MessageView({ m, onApprovePlan, onRejectPlan }: {
+  m: Msg;
+  onApprovePlan?: () => void;
+  onRejectPlan?: () => void;
+}) {
   if (m.role === "user") {
     return (
       <div style={{ alignSelf: "flex-end", maxWidth: "75%", display: "flex", flexDirection: "column", gap: 6, alignItems: "flex-end" }}>
@@ -432,6 +468,30 @@ function MessageView({ m }: { m: Msg }) {
         {m.content && <div className={m.streaming ? "typing-cursor" : ""} style={{ whiteSpace: "pre-wrap" }}>{m.content}</div>}
         {m.toolCalls?.map((tc, i) => <ToolCard key={i} tc={tc} />)}
         {m.artifactIds?.map(aid => <ArtifactRef key={aid} artifactId={aid} />)}
+        {/* P44 — Plan approval controls. Shown under a plan-first message
+            until the user approves (sends 'go') or rejects. Edit is implicit:
+            type a message to revise. */}
+        {m.wasPlanFirst && !m.planResolved && !m.streaming && (
+          <div style={{
+            marginTop: 12, padding: 12,
+            background: "rgba(168,85,247,0.06)",
+            border: "1px solid rgba(168,85,247,0.30)",
+            borderRadius: 10,
+            display: "flex", alignItems: "center", gap: 12,
+          }}>
+            <div style={{ flex: 1, fontSize: 12.5, color: "var(--text-muted)" }}>
+              Plan ready. Approve to execute, or type a message below to revise.
+            </div>
+            <button onClick={onRejectPlan} className="btn"
+              style={{ fontSize: 12, padding: "5px 12px" }}>
+              Skip
+            </button>
+            <button onClick={onApprovePlan} className="btn btn-primary"
+              style={{ fontSize: 12, padding: "5px 14px" }}>
+              ▶ Approve &amp; execute
+            </button>
+          </div>
+        )}
         {/* P25b + P27b — save-as-memory + cost footer on completed assistant messages */}
         {m.content && !m.streaming && (
           <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>

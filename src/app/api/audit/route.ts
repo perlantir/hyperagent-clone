@@ -73,6 +73,34 @@ export async function GET(req: Request) {
     [user.id],
   );
 
+  // P44 — CSV export. format=csv returns the same filtered rows as a
+  // text/csv stream (no pagination — bounded by limit). Used by the
+  // /audit page's "Export CSV" button for compliance review.
+  const format = u.searchParams.get("format");
+  if (format === "csv") {
+    const headers = ["ts","action","result","resource","userId","ip","userAgent","metadata"];
+    const lines = [headers.join(",")];
+    for (const r of rows.rows) {
+      const cells = [
+        new Date(Number(r.ts)).toISOString(),
+        r.action || "",
+        r.result || "",
+        r.resource || "",
+        r.userId || "",
+        r.ip || "",
+        (r.userAgent || "").slice(0, 200),
+        JSON.stringify(r.metadata || {}),
+      ];
+      lines.push(cells.map(csvEscape).join(","));
+    }
+    return new Response(lines.join("\n"), {
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="audit-${new Date().toISOString().slice(0,10)}.csv"`,
+      },
+    });
+  }
+
   return NextResponse.json({
     events: rows.rows.map((r: any) => ({
       ...r,
@@ -83,4 +111,12 @@ export async function GET(req: Request) {
     distinctActions: distinctActions.rows.map((r: any) => r.action),
     limit, offset,
   });
+}
+
+// CSV-escape per RFC 4180: wrap in quotes if the value contains comma /
+// quote / newline; double up internal quotes.
+function csvEscape(s: any): string {
+  const t = String(s ?? "");
+  if (/[",\n\r]/.test(t)) return `"${t.replace(/"/g, '""')}"`;
+  return t;
 }
