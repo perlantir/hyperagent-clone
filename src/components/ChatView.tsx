@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { SaveMemoryButton } from "@/components/SaveMemoryButton";
 import { useToast } from "@/components/Toast";
+import { AddMenu, RunModeMenu, type RunMode } from "@/components/ComposerMenu";
 
 interface Attachment {
   kind: "image" | "file";
@@ -30,6 +31,12 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
   const [pending, setPending] = useState<Attachment[]>([]);
   const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
+  // P38 — run-mode for the next send. Plan-first triggers a planning-only
+  // turn server-side; subsequent turns default back to "execute".
+  const [runMode, setRunMode] = useState<RunMode>("execute");
+  // Track the last completed assistant runId so the "Run evaluation" /
+  // "Give feedback" actions in RunModeMenu have a target.
+  const [lastRunId, setLastRunId] = useState<string | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -116,6 +123,7 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
         body: JSON.stringify({
           threadId, content: text, useRouter: useRouter && !agentId,
           attachments: attachmentsForSend.length > 0 ? attachmentsForSend : undefined,
+          runMode,
         }),
       });
       if (!r.ok || !r.body) throw new Error("Chat request failed");
@@ -171,6 +179,11 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
             setRouterNote(ev.reason);
           } else if (ev.type === "done") {
             setMessages(m => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], streaming: false, costCredits: ev.costCredits, runId: ev.runId }; return c; });
+            // P38 — capture the completed runId so RunModeMenu actions
+            // (Run eval / Give feedback) have a target. Plan-first auto-
+            // resets to execute so the user's next turn runs normally.
+            if (ev.runId) setLastRunId(ev.runId);
+            if (runMode === "plan_first") setRunMode("execute");
           } else if (ev.type === "error") {
             setMessages(m => { const c = [...m]; c[c.length - 1] = { ...c[c.length - 1], content: assistantText + "\n\n[error: " + ev.message + "]", streaming: false }; return c; });
           }
@@ -260,17 +273,12 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
                 for (const f of files) await uploadAttachment(f);
                 if (fileInputRef.current) fileInputRef.current.value = "";
               }} />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-              title="Attach an image or text file"
-              style={{
-                width: 32, height: 32, borderRadius: 7, background: "transparent",
-                border: "1px solid var(--border)", color: "var(--text-muted)",
-                fontSize: 14, lineHeight: 1, opacity: uploading ? 0.4 : 1,
-              }}>
-              {uploading ? "…" : "+"}
-            </button>
+            {/* P38 — sectioned + button menu (uploads / outputs / memories / skills / integrations / assets) */}
+            <AddMenu
+              threadId={threadId}
+              onPickFile={() => fileInputRef.current?.click()}
+              onInsertReference={(token) => setInput(prev => prev ? `${prev} ${token} ` : `${token} `)}
+            />
             {!agentId && (
               <label style={{ fontSize: 11.5, color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6, padding: "5px 10px", border: "1px solid var(--border)", borderRadius: 7, cursor: "pointer" }}>
                 <input type="checkbox" checked={useRouter} onChange={e => setUseRouter(e.target.checked)} style={{ margin: 0 }} />
@@ -280,10 +288,18 @@ export function ChatView({ threadId, agentId }: { threadId: string; agentId: str
             <span style={{ fontSize: 11.5, color: "var(--text-faint)", padding: "5px 10px", border: "1px solid var(--border)", borderRadius: 7 }}>
               {agentId ? agents.find((a: any) => a.id === agentId)?.name || "Agent" : "Default"}
             </span>
-            <button onClick={send} disabled={streaming || (!input.trim() && pending.length === 0)}
-              style={{ marginLeft: "auto", width: 32, height: 32, borderRadius: 8, border: "none", background: "var(--text)", color: "var(--bg)", fontSize: 14, opacity: streaming || (!input.trim() && pending.length === 0) ? 0.3 : 1 }}>
-              ↑
-            </button>
+            <div style={{ marginLeft: "auto" }}>
+              {/* P38 — run-mode menu (Plan first / Execute / actions) replaces the bare Send button */}
+              <RunModeMenu
+                threadId={threadId}
+                agentId={agentId}
+                lastRunId={lastRunId}
+                runMode={runMode}
+                onChangeRunMode={setRunMode}
+                onSend={send}
+                disabled={streaming || (!input.trim() && pending.length === 0)}
+              />
+            </div>
           </div>
         </div>
       </div>

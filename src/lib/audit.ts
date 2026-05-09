@@ -29,7 +29,8 @@ export type AuditAction =
   | "permission.denied"
   | "thread.delete" | "agent_run.cancelled"
   | "cron.tick"
-  | "sandbox.exec" | "sandbox.blocked";
+  | "sandbox.exec" | "sandbox.blocked"
+  | "feedback.submit" | "skill.create_from_thread" | "rubric.eval_manual";
 
 export type AuditResult = "success" | "failure" | "denied";
 

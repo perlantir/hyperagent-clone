@@ -43,7 +43,14 @@ export const runtime = "nodejs";
 export async function POST(req: Request) {
   const user = await getCurrentUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
-  const { threadId, content, useRouter, attachments } = await req.json().catch(() => ({}));
+  const { threadId, content, useRouter, attachments, runMode } = await req.json().catch(() => ({}));
+  // P38 — runMode controls how this turn is executed.
+  //   "execute" (default): run normally.
+  //   "plan_first": prepend a planning instruction to the system prompt so
+  //     the agent writes Plan Tasks to the working doc and STOPS before
+  //     taking any other action. The user reviews the plan, then sends
+  //     "go" with runMode="execute" to run it.
+  const planFirst = runMode === "plan_first";
   // Allow content-empty when an image attachment is the message — common UX
   // pattern: drop image, hit send. But still require ONE of content or attachment.
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
@@ -120,7 +127,23 @@ export async function POST(req: Request) {
       }
     },
   });
-  const systemBlocks = compiled.systemBlocks;
+  let systemBlocks = compiled.systemBlocks;
+
+  // P38 — plan-first injection. Prepended as the FIRST system block so the
+  // instruction wins against any later override. Only applies for this
+  // single turn; subsequent "execute" turns use the standard prompt.
+  if (planFirst) {
+    const planPreamble = {
+      type: "text" as const,
+      text: `[PLAN MODE — this turn only]
+Before doing anything else, draft a Plan Tasks list in the working doc by calling update_working_memory with section "Plan Tasks" and a list of checkbox tasks (e.g. "- [ ] First step"). Each task should be one short sentence describing a concrete action.
+
+After writing the plan, STOP. Do not call any other tools, do not produce a final answer. Reply with a one-sentence summary of the plan and wait for the user to review and say "go". The user will reply with "go" (or similar) to execute.
+
+Do not skip the planning step even if the request seems simple.`,
+    };
+    systemBlocks = [planPreamble, ...systemBlocks];
+  }
 
   // Build the conversation history for Anthropic.
   // P31 — translate per-message attachments into Anthropic content blocks:
